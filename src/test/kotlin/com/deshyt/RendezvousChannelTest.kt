@@ -7,6 +7,7 @@ import org.jetbrains.kotlinx.lincheck.paramgen.IntGen
 import org.jetbrains.kotlinx.lincheck.strategy.managed.modelchecking.ModelCheckingOptions
 import org.junit.Test
 
+@Suppress("unused")
 @Param(name = "elem", gen = IntGen::class, conf = "0:3")
 class RendezvousChannelTest {
     private val channel = RendezvousChannel<Int>()
