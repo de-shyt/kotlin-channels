@@ -26,21 +26,21 @@ class RendezvousChannel<E> : Channel<E> {
         while (true) {
             if (s < receiversCounter.get()) {
                 // The receiver should be in the cell. Making a rendezvous...
-                if (cell.state.compareAndSet(CellType.RECEIVER, CellType.DONE)) {
+                if (cell.state.compareAndSet(StateType.RECEIVER, StateType.DONE)) {
                     return true
                 }
-                if (cell.state.compareAndSet(CellType.EMPTY, CellType.BUFFERED)) {
+                if (cell.state.compareAndSet(StateType.EMPTY, StateType.BUFFERED)) {
                     // The receiver came, but its coroutine is not placed in the cell yet. Mark the cell BUFFERED.
                     return true
                 }
-                if (cell.state.get() == CellType.BROKEN || cell.state.get() == CellType.INTERRUPTED) {
+                if (cell.state.get() == StateType.BROKEN || cell.state.get() == StateType.INTERRUPTED) {
                     // The cell was marked BROKEN by the receiver or INTERRUPTED. Restart the sender.
                     cell.elem = null
                     return false
                 }
             } else {
                 // The cell is empty. Try placing the sender in the cell.
-                if (cell.state.compareAndSet(CellType.EMPTY, CellType.SENDER)) {
+                if (cell.state.compareAndSet(StateType.EMPTY, StateType.SENDER)) {
                     return true
                 }
             }
@@ -63,23 +63,23 @@ class RendezvousChannel<E> : Channel<E> {
         val cell = cells[r]
         while (true) {
             if (r < sendersCounter.get()) {
-                if (cell.state.compareAndSet(CellType.SENDER, CellType.DONE)
-                    || cell.state.compareAndSet(CellType.BUFFERED, CellType.DONE)) {
+                if (cell.state.compareAndSet(StateType.SENDER, StateType.DONE)
+                    || cell.state.compareAndSet(StateType.BUFFERED, StateType.DONE)) {
                     // The element was placed in the cell by the sender
                     return true
                 }
-                if (cell.state.compareAndSet(CellType.EMPTY, CellType.BROKEN)) {
+                if (cell.state.compareAndSet(StateType.EMPTY, StateType.BROKEN)) {
                     // The sender came, but the cell is empty
                     return false
                 }
-                if (cell.state.get() == CellType.INTERRUPTED) {
+                if (cell.state.get() == StateType.INTERRUPTED) {
                     // The cell was INTERRUPTED. Restart the receiver.
                     cell.elem = null
                     return false
                 }
             } else {
                 // The cell is empty. Try placing the receiver in the cell.
-                if (cell.state.compareAndSet(CellType.EMPTY, CellType.RECEIVER)) {
+                if (cell.state.compareAndSet(StateType.EMPTY, StateType.RECEIVER)) {
                     return true
                 }
             }

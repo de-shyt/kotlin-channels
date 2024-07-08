@@ -3,11 +3,11 @@ package com.deshyt
 import java.util.concurrent.atomic.AtomicReference
 
 class Waiter {
-    val state: AtomicReference<CellType> = AtomicReference(CellType.EMPTY)
+    val state: AtomicReference<Any> = AtomicReference(StateType.EMPTY)
     var elem: Any? = null
 }
 
-enum class CellType {
+enum class StateType {
     RECEIVER, SENDER, EMPTY, DONE, BUFFERED, BROKEN, INTERRUPTED
 }
 
