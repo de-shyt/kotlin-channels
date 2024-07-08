@@ -11,67 +11,78 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private val sendersCounter = AtomicInteger(0)
     private val receiversCounter = AtomicInteger(0)
-    private val cells = Collections.unmodifiableList(ArrayList<Waiter>(1000))
+    private val cells = ArrayList<Waiter>(1000)
 
     override suspend fun send(elem: E) {
-        val s = sendersCounter.getAndIncrement()
+        while (true) {
+            val s = sendersCounter.getAndIncrement()
+            cells[s].elem = elem
+            if (updateCellOnSend(s)) return
+        }
+    }
+
+    private fun updateCellOnSend(s: Int): Boolean {
         val cell = cells[s]
-        cell.elem = elem
         while (true) {
             if (s < receiversCounter.get()) {
-                if (cell.state.compareAndSet(CellType.BROKEN, CellType.SENDER)) {
-                    // The cell was marked BROKEN by the receiver. Place the current sender in it.
-                    return
-                }
                 // The receiver should be in the cell. Making a rendezvous...
-                if (!cell.state.compareAndSet(CellType.RECEIVER, CellType.DONE)) {
-                    // The receiver came, but its coroutine is not placed in the cell yet. Mark the cell BUFFERED.
-                    cell.state.compareAndSet(CellType.EMPTY, CellType.BUFFERED)
+                if (cell.state.compareAndSet(CellType.RECEIVER, CellType.DONE)) {
+                    return true
                 }
-                return
+                if (cell.state.compareAndSet(CellType.EMPTY, CellType.BUFFERED)) {
+                    // The receiver came, but its coroutine is not placed in the cell yet. Mark the cell BUFFERED.
+                    return true
+                }
+                if (cell.state.get() == CellType.BROKEN || cell.state.get() == CellType.INTERRUPTED) {
+                    // The cell was marked BROKEN by the receiver or INTERRUPTED. Restart the sender.
+                    cell.elem = null
+                    return false
+                }
             } else {
                 // The cell is empty. Try placing the sender in the cell.
-                if (!cell.state.compareAndSet(CellType.EMPTY, CellType.SENDER)) {
-                    continue
+                if (cell.state.compareAndSet(CellType.EMPTY, CellType.SENDER)) {
+                    return true
                 }
-                // The sender is placed in the cell.
-                return
             }
         }
     }
 
     @Suppress("UNCHECKED_CAST")
     override suspend fun receive(): E {
-        val r = receiversCounter.getAndIncrement()
+        while (true) {
+            val r = receiversCounter.getAndIncrement()
+            if (updateCellOnReceive(r)) {
+                val elem = cells[r].elem as E
+                cells[r].elem = null
+                return elem
+            }
+        }
+    }
+
+    private fun updateCellOnReceive(r: Int): Boolean {
         val cell = cells[r]
         while (true) {
             if (r < sendersCounter.get()) {
-                if (cell.state.compareAndSet(CellType.SENDER, CellType.DONE)) {
-                    // The sender placed an element in the cell and suspended
-                    break
+                if (cell.state.compareAndSet(CellType.SENDER, CellType.DONE)
+                    || cell.state.compareAndSet(CellType.BUFFERED, CellType.DONE)) {
+                    // The element was placed in the cell by the sender
+                    return true
                 }
-//                if (cell.state.compareAndSet(CellType.BUFFERED, CellType.DONE)) {
-//                    // The sender placed an element and left without suspending
-//                    break
-//                }
-                // The sender came, but its coroutine is not placed in the cell yet.
-                cell.state.compareAndSet(CellType.EMPTY, CellType.BROKEN)
-                continue
+                if (cell.state.compareAndSet(CellType.EMPTY, CellType.BROKEN)) {
+                    // The sender came, but the cell is empty
+                    return false
+                }
+                if (cell.state.get() == CellType.INTERRUPTED) {
+                    // The cell was INTERRUPTED. Restart the receiver.
+                    cell.elem = null
+                    return false
+                }
             } else {
                 // The cell is empty. Try placing the receiver in the cell.
-                if (!cell.state.compareAndSet(CellType.EMPTY, CellType.RECEIVER)) {
-                    continue
-                }
-                // The receiver is placed in the cell. Waiting for the sender...
-                while (true) {
-                    if (cell.state.get() == CellType.DONE) {
-                        break
-                    }
+                if (cell.state.compareAndSet(CellType.EMPTY, CellType.RECEIVER)) {
+                    return true
                 }
             }
         }
-        val result = cell.elem as E
-        cell.elem = null
-        return result
     }
 }
