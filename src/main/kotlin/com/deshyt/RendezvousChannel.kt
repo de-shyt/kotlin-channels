@@ -1,7 +1,9 @@
 package com.deshyt
 
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
 
 class RendezvousChannel<E> : Channel<E> {
     /*
@@ -21,7 +23,7 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    private fun updateCellOnSend(s: Int): Boolean {
+    private suspend fun updateCellOnSend(s: Int): Boolean {
         val cell = cells[s]
         while (true) {
             if (s < receiversCounter.get()) {
@@ -41,7 +43,7 @@ class RendezvousChannel<E> : Channel<E> {
             } else {
                 // The cell is empty. Try placing the sender in the cell.
                 if (cell.state.compareAndSet(StateType.EMPTY, StateType.SENDER)) {
-                    return true
+                    return suspendCell(s)
                 }
             }
         }
@@ -59,7 +61,7 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    private fun updateCellOnReceive(r: Int): Boolean {
+    private suspend fun updateCellOnReceive(r: Int): Boolean {
         val cell = cells[r]
         while (true) {
             if (r < sendersCounter.get()) {
@@ -80,8 +82,29 @@ class RendezvousChannel<E> : Channel<E> {
             } else {
                 // The cell is empty. Try placing the receiver in the cell.
                 if (cell.state.compareAndSet(StateType.EMPTY, StateType.RECEIVER)) {
-                    return true
+                    return suspendCell(r)
                 }
+            }
+        }
+    }
+
+    /*
+       Responsible for suspending requests. When a request (receiver or sender) is waiting for a rendezvous,
+       it suspends until the cell state is marked `StateType.DONE`.
+     */
+    private suspend fun suspendCell(idx: Int): Boolean {
+        val cell = cells[idx]
+        val requestType = cell.state.get()
+        require(requestType == StateType.RECEIVER || requestType == StateType.SENDER) { "The cell state should be StateType.RECEIVER or StateType.SENDER" }
+
+        return suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation {
+                cell.state.compareAndSet(requestType, StateType.INTERRUPTED)
+                cell.elem = null
+            }
+            while (true) {
+                if (cell.state.get() == StateType.DONE)
+                    continuation.resume(true)
             }
         }
     }
