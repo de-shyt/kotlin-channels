@@ -8,6 +8,6 @@ class Waiter {
 }
 
 enum class StateType {
-    RECEIVER, SENDER, EMPTY, DONE, BUFFERED, BROKEN, INTERRUPTED
+    EMPTY, DONE, BUFFERED, BROKEN, INTERRUPTED
 }
 

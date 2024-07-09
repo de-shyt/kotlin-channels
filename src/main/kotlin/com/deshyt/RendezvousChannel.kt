@@ -1,9 +1,10 @@
 package com.deshyt
 
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.resume
 
 class RendezvousChannel<E> : Channel<E> {
     /*
@@ -27,9 +28,9 @@ class RendezvousChannel<E> : Channel<E> {
         val cell = cells[s]
         while (true) {
             if (s < receiversCounter.get()) {
-                // The receiver should be in the cell. Making a rendezvous...
-                if (cell.state.compareAndSet(StateType.RECEIVER, StateType.DONE)) {
-                    return true
+                if (cell.state.get() is CancellableContinuation<*>) {
+                    // The receiver is in the cell waiting for a rendezvous
+                    return tryMakeRendezvous(s)
                 }
                 if (cell.state.compareAndSet(StateType.EMPTY, StateType.BUFFERED)) {
                     // The receiver came, but its coroutine is not placed in the cell yet. Mark the cell BUFFERED.
@@ -63,18 +64,21 @@ class RendezvousChannel<E> : Channel<E> {
         val cell = cells[r]
         while (true) {
             if (r < sendersCounter.get()) {
-                if (cell.state.compareAndSet(StateType.SENDER, StateType.DONE)
-                    || cell.state.compareAndSet(StateType.BUFFERED, StateType.DONE)) {
+                if (cell.state.get() is CancellableContinuation<*>) {
+                    // The sender is in the cell waiting for a rendezvous
+                    return tryMakeRendezvous(r)
+                }
+                if (cell.state.compareAndSet(StateType.BUFFERED, StateType.DONE)) {
                     // The element was placed in the cell by the sender
                     return true
                 }
                 if (cell.state.compareAndSet(StateType.EMPTY, StateType.BROKEN)) {
                     // The sender came, but the cell is empty
+                    cell.elem = null
                     return false
                 }
                 if (cell.state.get() == StateType.INTERRUPTED) {
                     // The cell was INTERRUPTED. Restart the receiver.
-                    cell.elem = null
                     return false
                 }
             } else {
@@ -85,22 +89,60 @@ class RendezvousChannel<E> : Channel<E> {
     }
 
     /*
-       Responsible for suspending requests. When a request (receiver or sender) is waiting for a rendezvous,
-       it suspends until the cell state is marked `StateType.DONE`.
+       Responsible for making a rendezvous. The method requires that there is a suspended coroutine
+       of the opposite request stored in the `cells[idx]`. If the coroutine is successfully resumed,
+       the cell is marked DONE; otherwise, it is marked BROKEN and resources are cleaned.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun tryMakeRendezvous(idx: Int): Boolean {
+        val cell = cells[idx]
+        require(cell.state.get() is CancellableContinuation<*>)
+        { "tryMakeRendezvous(idx) is called on unoccupied cell (no suspended coroutine was found)." }
+        val cont = cell.state.get() as CancellableContinuation<Boolean>
+        if (cont.tryResumeRequest(true)) {
+            cell.state.compareAndSet(cont, StateType.DONE)
+            return true
+        } else {
+            cell.state.compareAndSet(cont, StateType.BROKEN)
+            cell.elem = null
+            return false
+        }
+    }
+
+    /*
+       Responsible for suspending a request. When the opposite request comes to the cell, it
+       resumes the coroutine with the specified boolean value. This value is then returned by
+       [trySuspendRequest].
+       If there is a failure while trying to place a coroutine in the cell, [trySuspendRequest]
+       attempts to resume the coroutine, then returns false.
      */
     private suspend fun trySuspendRequest(idx: Int): Boolean {
         val cell = cells[idx]
-        var result = true
-        suspendCancellableCoroutine { cont ->
+        return suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation {
-                cell.state.set(StateType.INTERRUPTED)
+                cell.state.compareAndSet(it, StateType.INTERRUPTED)
                 cell.elem = null
             }
+            // Try to place the coroutine in the cell.
             if (!cell.state.compareAndSet(StateType.EMPTY, cont))
                 // The cell is occupied by the opposite request. Resume the coroutine.
-                result = false
-                cont.resume(Unit)
+                cont.tryResumeRequest(false)
         }
-        return result
+    }
+
+    /*
+       Responsible for resuming a coroutine. The given value is the one that should be returned
+       in the suspension point. If the coroutine is successfully resumed, [tryResumeRequest]
+       returns true, otherwise it returns false.
+     */
+    @OptIn(InternalCoroutinesApi::class)
+    private fun <T> CancellableContinuation<T>.tryResumeRequest(value: T): Boolean {
+        val token = tryResume(value)
+        if (token != null) {
+            completeResume(token)
+            return true
+        } else {
+            return false
+        }
     }
 }
