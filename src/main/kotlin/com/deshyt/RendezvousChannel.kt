@@ -41,10 +41,8 @@ class RendezvousChannel<E> : Channel<E> {
                     return false
                 }
             } else {
-                // The cell is empty. Try placing the sender in the cell.
-                if (cell.state.compareAndSet(StateType.EMPTY, StateType.SENDER)) {
-                    return suspendCell(s)
-                }
+                // The cell is empty. Try placing the sender's coroutine in the cell.
+                if (trySuspendRequest(s)) return true
             }
         }
     }
@@ -80,10 +78,8 @@ class RendezvousChannel<E> : Channel<E> {
                     return false
                 }
             } else {
-                // The cell is empty. Try placing the receiver in the cell.
-                if (cell.state.compareAndSet(StateType.EMPTY, StateType.RECEIVER)) {
-                    return suspendCell(r)
-                }
+                // The cell is empty. Try placing the receiver's coroutine in the cell.
+                if (trySuspendRequest(r)) return true
             }
         }
     }
@@ -92,20 +88,19 @@ class RendezvousChannel<E> : Channel<E> {
        Responsible for suspending requests. When a request (receiver or sender) is waiting for a rendezvous,
        it suspends until the cell state is marked `StateType.DONE`.
      */
-    private suspend fun suspendCell(idx: Int): Boolean {
+    private suspend fun trySuspendRequest(idx: Int): Boolean {
         val cell = cells[idx]
-        val requestType = cell.state.get()
-        require(requestType == StateType.RECEIVER || requestType == StateType.SENDER) { "The cell state should be StateType.RECEIVER or StateType.SENDER" }
-
-        return suspendCancellableCoroutine { continuation ->
-            continuation.invokeOnCancellation {
-                cell.state.compareAndSet(requestType, StateType.INTERRUPTED)
+        var result = true
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation {
+                cell.state.set(StateType.INTERRUPTED)
                 cell.elem = null
             }
-            while (true) {
-                if (cell.state.get() == StateType.DONE)
-                    continuation.resume(true)
-            }
+            if (!cell.state.compareAndSet(StateType.EMPTY, cont))
+                // The cell is occupied by the opposite request. Resume the coroutine.
+                result = false
+                cont.resume(Unit)
         }
+        return result
     }
 }
