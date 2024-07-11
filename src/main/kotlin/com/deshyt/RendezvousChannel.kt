@@ -3,7 +3,6 @@ package com.deshyt
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
-import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
 
 class RendezvousChannel<E> : Channel<E> {
@@ -14,7 +13,7 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private val sendersCounter = AtomicInteger(0)
     private val receiversCounter = AtomicInteger(0)
-    private val cells = ArrayList<Waiter>(1000)
+    private val cells = List(1000) { Waiter() }
 
     override suspend fun send(elem: E) {
         while (true) {
