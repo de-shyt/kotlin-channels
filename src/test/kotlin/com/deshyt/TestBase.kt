@@ -12,7 +12,7 @@ abstract class TestBase(
 ) {
     @Test
     fun modelCheckingTest() = ModelCheckingOptions()
-        .iterations(scenarios(false))
+        .iterations(scenarios)
         .invocationsPerIteration(invokePerScenarioAmount(false))
         .threads(threadsAmount)
         .actorsBefore(actorsBeforeAmount)
@@ -24,7 +24,7 @@ abstract class TestBase(
 
     @Test
     fun stressTest() = StressOptions()
-        .iterations(scenarios(true))
+        .iterations(scenarios)
         .invocationsPerIteration(invokePerScenarioAmount(true))
         .threads(threadsAmount)
         .actorsBefore(actorsBeforeAmount)
@@ -35,13 +35,14 @@ abstract class TestBase(
 }
 
 // Configures the number of times the LinChecker will generate different concurrent scenarios and execute them
-fun scenarios(isStressTest: Boolean) = if (isStressTest) 10 else 50
+val scenarios = 150
+//fun scenarios(isStressTest: Boolean) = if (isStressTest) 100 else 1000
 
 // Defines the number of method calls that will be performed in each concurrent scenario.
-fun invokePerScenarioAmount(isStressTest: Boolean) = if (isStressTest) 200 else 100
+fun invokePerScenarioAmount(isStressTest: Boolean) = if (isStressTest) 25_000 else 10_000
 
 // Sets the number of threads that will be operating in parallel
-val threadsAmount = 3
+val threadsAmount = 2
 
 // Define the structure of each test scenario (number of operations executed before/during/after the parallel part)
 val actorsBeforeAmount = 2
