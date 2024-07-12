@@ -42,7 +42,7 @@ val scenarios = 150
 fun invokePerScenarioAmount(isStressTest: Boolean) = if (isStressTest) 25_000 else 10_000
 
 // Sets the number of threads that will be operating in parallel
-val threadsAmount = 2
+val threadsAmount = 3
 
 // Define the structure of each test scenario (number of operations executed before/during/after the parallel part)
 val actorsBeforeAmount = 2
