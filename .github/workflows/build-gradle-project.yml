@@ -1,7 +1,13 @@
-name: Build Gradle project
+name: Build Gradle project && Run tests
 
+# Run tests when `push` is performed or when it is a PR targeting 'main'
 on:
   push:
+    branches:
+      - 'main'
+  pull_request:
+    branches:
+      - 'main'
 
 jobs:
   build-gradle-project:
@@ -18,4 +24,4 @@ jobs:
           build-scan-terms-of-use-agree: "yes"
 
       - name: Run build
-        run: ./gradlew build -x test
+        run: ./gradlew build
