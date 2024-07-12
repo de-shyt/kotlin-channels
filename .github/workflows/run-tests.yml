@@ -3,6 +3,8 @@ name: Run Gradle tests
 # Run tests when `push` is performed or when it is a PR targeting 'main'
 on:
   push:
+    branches:
+      - 'main'
   pull_request:
     branches:
       - 'main'
