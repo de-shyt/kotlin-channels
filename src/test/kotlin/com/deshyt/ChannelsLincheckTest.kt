@@ -11,7 +11,7 @@ import java.util.*
 class RendezvousChannelTest : ChannelTestBase(
     c = RendezvousChannel(),
     sequentialSpecification = SequentialRendezvousChannel::class.java,
-    obstructionFree = false
+    obstructionFree = true
 )
 
 // Sequential specification for a rendezvous channel
