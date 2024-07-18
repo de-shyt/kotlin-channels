@@ -9,8 +9,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 class RendezvousChannel<E> : Channel<E> {
     /*
       The counters show the total amount of senders and receivers ever performed.
-      The counters are incremented in the beginning of the corresponding operation,
-      thus, acquiring a unique (for the operation type) cell to process.
+      The counters are incremented in the beginning of the corresponding operation, thus
+      acquiring a unique (for the operation type) cell to process.
      */
     private val sendersCounter = atomic(0L)
     private val receiversCounter = atomic(0L)
@@ -31,7 +31,8 @@ class RendezvousChannel<E> : Channel<E> {
     override suspend fun send(elem: E) {
         while (true) {
             val s = sendersCounter.getAndIncrement()
-            val cell = findAndMoveForwardSend(sendSegment.value, s).getCell(s)
+            val cell = findAndMoveForwardSend(startSegment = sendSegment.value, destSegmentId = s / SEGMENT_SIZE)
+                .getCell(index = (s % SEGMENT_SIZE).toInt())
             cell.setElement(elem)
             if (updateCellOnSend(s, cell)) return
         }
@@ -59,11 +60,11 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    @Suppress("UNCHECKED_CAST")
     override suspend fun receive(): E {
         while (true) {
             val r = receiversCounter.getAndIncrement()
-            val cell = findAndMoveForwardReceive(receiveSegment.value, r).getCell(r)
+            val cell = findAndMoveForwardReceive(startSegment = receiveSegment.value, destSegmentId = r / SEGMENT_SIZE)
+                .getCell(index = (r % SEGMENT_SIZE).toInt())
             if (updateCellOnReceive(r, cell)) {
                 return cell.retrieveElement()
             }
@@ -129,13 +130,13 @@ class RendezvousChannel<E> : Channel<E> {
     private suspend fun trySuspendRequest(cell: AtomicWaiter<E>): Boolean {
         return suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation {
-                cell.setState(StateType.INTERRUPTED)
-                cell.cleanElement()
+                cell.onInterrupt()
             }
             // Try to place the coroutine in the cell.
-            if (!cell.casState(StateType.EMPTY, cont))
-            // The cell is occupied by the opposite request. Resume the coroutine.
+            if (!cell.casState(StateType.EMPTY, cont)) {
+                // The cell is occupied by the opposite request. Resume the coroutine.
                 cont.tryResumeRequest(false)
+            }
         }
     }
 
@@ -160,8 +161,8 @@ class RendezvousChannel<E> : Channel<E> {
        If `startSegment != destSegment`, it means a new segment was created and `sendersCounter`
        now points to it. The corresponding `sendSegment` pointer should be moved forward.
      */
-    private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, cellIdx: Long): ChannelSegment<E> {
-        val destSegment = findSegment(startSegment = startSegment, destSegmentId = cellIdx / SEGMENT_SIZE)
+    private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+        val destSegment = findSegment(startSegment, destSegmentId)
         // If `sendersCounter` moved to the next segment, update the pointer
         sendSegment.compareAndSet(startSegment, destSegment)
         return destSegment
@@ -172,8 +173,8 @@ class RendezvousChannel<E> : Channel<E> {
        If `startSegment != destSegment`, it means a new segment was created and `receiversCounter`
        now points to it. The corresponding `receiveSegment` pointer should be moved forward.
      */
-    private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, cellIdx: Long): ChannelSegment<E> {
-        val destSegment = findSegment(startSegment = startSegment, destSegmentId = cellIdx / SEGMENT_SIZE)
+    private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+        val destSegment = findSegment(startSegment, destSegmentId)
         // If `receiversCounter` moved to the next segment, update the pointer
         receiveSegment.compareAndSet(startSegment, destSegment)
         return destSegment
@@ -189,18 +190,5 @@ class RendezvousChannel<E> : Channel<E> {
         return curSegment
     }
 
-    private fun onInterruptedCell() {
-        // TODO("Not implemented yet")
-    }
-
-    override fun checkSegmentStructureInvariants() {
-//        val firstSegment = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
-//        check(firstSegment.prev.value == null) {
-//            "All processed segments should be unreachable from the data structure, but the `prev` link of the leftmost segment is non-null."
-//        }
-//        var curSegment = firstSegment
-//        while (curSegment.next.value != null) {
-//
-//        }
-    }
+    override fun checkSegmentStructureInvariants() {}
 }

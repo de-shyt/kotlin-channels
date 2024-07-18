@@ -7,15 +7,26 @@ import kotlinx.atomicfu.atomic
 class ChannelSegment<E>(
     val id: Long
 ) {
-    val prev: AtomicRef<ChannelSegment<E>?> = atomic(null)
     val next: AtomicRef<ChannelSegment<E>?> = atomic(null)
-    private val cells = List(SEGMENT_SIZE) { AtomicWaiter<E>() }
+    private val cells = List(SEGMENT_SIZE) { AtomicWaiter(this) }
 
-    fun getCell(idx: Long): AtomicWaiter<E> {
-        require(idx / SEGMENT_SIZE == id)
-            { "Trying to retrieve cell from the wrong segment (segment id: $id, given id: ${idx / SEGMENT_SIZE})" }
-        return cells[(idx % SEGMENT_SIZE).toInt()]
-    }
+    /*
+       The counter shows how many cells are marked INTERRUPTED in the segment. If the value
+       is equal to SEGMENT_SIZE, the segment should be removed.
+    */
+    private var interruptedCellsCounter = 0
+        get() = field
+
+    internal fun getCell(index: Int): AtomicWaiter<E> = cells[index]
+
+    /*
+       The segment's counter increases when the coroutine stored in one of the segment's cells
+       is cancelled (see [AtomicWaiter::onInterrupt] method).
+    */
+    internal fun increaseInterruptedCellsCounter() { interruptedCellsCounter++ }
+
+    /* This method returns true if there are cells in the segment which are not marked INTERRUPTED */
+    internal fun isActive(): Boolean = interruptedCellsCounter < SEGMENT_SIZE
 }
 
 const val SEGMENT_SIZE = 10

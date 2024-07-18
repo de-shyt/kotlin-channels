@@ -3,7 +3,9 @@ package com.deshyt
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 
-class AtomicWaiter<E> {
+class AtomicWaiter<E>(
+    private val segment: ChannelSegment<E>
+) {
     private val state: AtomicRef<Any> = atomic(StateType.EMPTY)
     private var elem: E? = null
 
@@ -34,6 +36,19 @@ class AtomicWaiter<E> {
 
     internal fun cleanElement() {
         elem = null
+    }
+
+    /*
+       This method is invoked on the cancellation of the coroutine's continuation (see
+       [RendezvousChannel::trySuspendRequest] method).
+       When the coroutine is cancelled, the cell's state is marked INTERRUPTED and its element
+       is set to null in order to avoid memory leaks. Besides, the cell informs the
+       corresponding segment about the cancellation by increasing the segment's counter.
+     */
+    internal fun onInterrupt() {
+        setState(StateType.INTERRUPTED)
+        cleanElement()
+        segment.increaseInterruptedCellsCounter()
     }
 }
 
