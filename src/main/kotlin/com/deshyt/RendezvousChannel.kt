@@ -66,6 +66,8 @@ class RendezvousChannel<E> : Channel<E> {
             val cell = findAndMoveForwardReceive(startSegment = receiveSegment.value, destSegmentId = r / SEGMENT_SIZE)
                 .getCell(index = (r % SEGMENT_SIZE).toInt())
             if (updateCellOnReceive(r, cell)) {
+                // The element was successfully received. Return the value,
+                // then clean the cell to avoid memory leaks
                 return cell.retrieveElement()
             }
         }
@@ -108,10 +110,10 @@ class RendezvousChannel<E> : Channel<E> {
         val cont = cell.getState()
         if (cont is CancellableContinuation<*>) {
             if ((cont as CancellableContinuation<Boolean>).tryResumeRequest(true)) {
-                cell.setState(StateType.DONE)
+                cell.casState(cont, StateType.DONE)
                 return true
             } else {
-                cell.setState(StateType.BROKEN)
+                cell.casState(cont, StateType.BROKEN)
                 cell.cleanElement()
                 return false
             }
@@ -129,9 +131,7 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private suspend fun trySuspendRequest(cell: AtomicWaiter<E>): Boolean {
         return suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation {
-                cell.onInterrupt()
-            }
+            cont.invokeOnCancellation { cell.onInterrupt() }
             // Try to place the coroutine in the cell.
             if (!cell.casState(StateType.EMPTY, cont)) {
                 // The cell is occupied by the opposite request. Resume the coroutine.
@@ -175,7 +175,6 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = findSegment(startSegment, destSegmentId)
-        // If `receiversCounter` moved to the next segment, update the pointer
         receiveSegment.compareAndSet(startSegment, destSegment)
         return destSegment
     }
@@ -190,5 +189,47 @@ class RendezvousChannel<E> : Channel<E> {
         return curSegment
     }
 
-    override fun checkSegmentStructureInvariants() {}
+    override fun checkSegmentStructureInvariants() {
+        val firstSegment = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
+        var curSegment: ChannelSegment<E>? = firstSegment
+
+        while (curSegment != null) {
+            var interruptedCells = 0
+
+            for (i in 0 until SEGMENT_SIZE) {
+                val cell = curSegment.getCell(i)
+
+                // Check that the cell is bounded with the right segment
+                check(cell.getSegmentId() == curSegment.id) {
+                    "Segment ${curSegment!!.id}: the cell $i is bounded with the wrong segment.\n" +
+                    "Channel state: $this"
+                }
+
+                // Check that there are no memory leaks
+                when (val state = cell.getState()) {
+                    StateType.EMPTY, StateType.DONE, StateType.BROKEN, StateType.INTERRUPTED -> {
+                        check(cell.getElement() == null) {
+                            "Segment ${curSegment!!.id}: the cell $i is marked ${state}, but the element is not null.\n" +
+                            "Cell: $cell\n" +
+                            "Channel state: $this"
+                        }
+                        if (state == StateType.INTERRUPTED) {
+                            interruptedCells++
+                        }
+                    }
+                    StateType.BUFFERED -> {}
+                    is CancellableContinuation<*> -> {}
+                    else -> error("Segment ${curSegment.id}: Unexpected state $state for the cell $i.\nChannel state: $this")
+                }
+            }
+
+            // Check that the value of the segment's counter is correct
+            check(interruptedCells == curSegment.getInterruptedCellsCounter()) {
+                "Segment ${curSegment!!.id}: the segment's counter and the actual amount of interrupted cells are different.\n" +
+                "Channel state: $this"
+            }
+
+            curSegment = curSegment.next.value
+        }
+    }
 }

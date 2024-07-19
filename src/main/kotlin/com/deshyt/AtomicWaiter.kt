@@ -9,6 +9,8 @@ class AtomicWaiter<E>(
     private val state: AtomicRef<Any> = atomic(StateType.EMPTY)
     private var elem: E? = null
 
+    internal fun getSegmentId() = segment.id
+
     // #####################################
     // # Manipulation with the State Field #
     // #####################################
@@ -25,14 +27,13 @@ class AtomicWaiter<E>(
     // # Manipulation with the Element Field #
     // #######################################
 
-    internal fun setElement(value: E?) {
+    internal fun setElement(value: E) {
         elem = value
     }
 
-    @Suppress("UNCHECKED_CAST")
-    internal fun getElement() = elem as E
+    internal fun getElement(): E? = elem
 
-    internal fun retrieveElement(): E = getElement().also { cleanElement() }
+    internal fun retrieveElement(): E = getElement()!!.also { cleanElement() }
 
     internal fun cleanElement() {
         elem = null
@@ -49,6 +50,10 @@ class AtomicWaiter<E>(
         setState(StateType.INTERRUPTED)
         cleanElement()
         segment.increaseInterruptedCellsCounter()
+    }
+
+    override fun toString(): String {
+        return "AtomicWaiter { segmentId=${segment.id}, state=${state.value}, element=${elem} }"
     }
 }
 

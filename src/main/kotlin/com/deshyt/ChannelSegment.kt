@@ -15,7 +15,6 @@ class ChannelSegment<E>(
        is equal to SEGMENT_SIZE, the segment should be removed.
     */
     private var interruptedCellsCounter = 0
-        get() = field
 
     internal fun getCell(index: Int): AtomicWaiter<E> = cells[index]
 
@@ -24,6 +23,8 @@ class ChannelSegment<E>(
        is cancelled (see [AtomicWaiter::onInterrupt] method).
     */
     internal fun increaseInterruptedCellsCounter() { interruptedCellsCounter++ }
+
+    internal fun getInterruptedCellsCounter(): Int = interruptedCellsCounter
 
     /* This method returns true if there are cells in the segment which are not marked INTERRUPTED */
     internal fun isActive(): Boolean = interruptedCellsCounter < SEGMENT_SIZE
