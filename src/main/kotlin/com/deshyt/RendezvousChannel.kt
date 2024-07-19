@@ -50,7 +50,9 @@ class RendezvousChannel<E> : Channel<E> {
                     return true
                 }
                 if (cell.getState() == StateType.BROKEN || cell.getState() == StateType.INTERRUPTED) {
-                    // The cell was marked BROKEN by the receiver or INTERRUPTED. Restart the sender.
+                    // The cell was marked BROKEN by the receiver or INTERRUPTED.
+                    // Clean the cell and restart the sender.
+                    cell.cleanElement()
                     return false
                 }
             } else {
@@ -119,6 +121,7 @@ class RendezvousChannel<E> : Channel<E> {
             }
         }
         // The cell state was changed to INTERRUPTED during the rendezvous
+        cell.cleanElement()
         return false
     }
 
@@ -210,7 +213,6 @@ class RendezvousChannel<E> : Channel<E> {
                     StateType.EMPTY, StateType.DONE, StateType.BROKEN, StateType.INTERRUPTED -> {
                         check(cell.getElement() == null) {
                             "Segment ${curSegment!!.id}: the cell $i is marked ${state}, but the element is not null.\n" +
-                            "Cell: $cell\n" +
                             "Channel state: $this"
                         }
                         if (state == StateType.INTERRUPTED) {
@@ -219,13 +221,17 @@ class RendezvousChannel<E> : Channel<E> {
                     }
                     StateType.BUFFERED -> {}
                     is CancellableContinuation<*> -> {}
-                    else -> error("Segment ${curSegment.id}: Unexpected state $state for the cell $i.\nChannel state: $this")
+                    else -> error(
+                        "Segment ${curSegment.id}: Unexpected state $state for the cell $i.\n" +
+                        "Channel state: $this"
+                    )
                 }
             }
 
             // Check that the value of the segment's counter is correct
-            check(interruptedCells == curSegment.getInterruptedCellsCounter()) {
-                "Segment ${curSegment!!.id}: the segment's counter and the actual amount of interrupted cells are different.\n" +
+            val segmentCounter = curSegment.getInterruptedCellsCounter()
+            check(interruptedCells == segmentCounter) {
+                "Segment ${curSegment!!.id}: the segment's counter ($segmentCounter) and the amount of interrupted cells ($interruptedCells) in the segment are different.\n" +
                 "Channel state: $this"
             }
 

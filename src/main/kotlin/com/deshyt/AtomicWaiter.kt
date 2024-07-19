@@ -51,10 +51,6 @@ class AtomicWaiter<E>(
         cleanElement()
         segment.increaseInterruptedCellsCounter()
     }
-
-    override fun toString(): String {
-        return "AtomicWaiter { segmentId=${segment.id}, state=${state.value}, element=${elem} }"
-    }
 }
 
 enum class StateType {
