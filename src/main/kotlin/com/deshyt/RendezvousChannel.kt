@@ -35,6 +35,7 @@ class RendezvousChannel<E> : Channel<E> {
                 .getCell(index = (s % SEGMENT_SIZE).toInt())
             cell.setElement(elem)
             if (updateCellOnSend(s, cell)) return
+            cell.cleanElement()
         }
     }
 
@@ -50,9 +51,7 @@ class RendezvousChannel<E> : Channel<E> {
                     return true
                 }
                 if (cell.getState() == StateType.BROKEN || cell.getState() == StateType.INTERRUPTED) {
-                    // The cell was marked BROKEN by the receiver or INTERRUPTED.
-                    // Clean the cell and restart the sender.
-                    cell.cleanElement()
+                    // The cell was marked BROKEN by the receiver or INTERRUPTED. Restart the sender.
                     return false
                 }
             } else {
@@ -68,8 +67,7 @@ class RendezvousChannel<E> : Channel<E> {
             val cell = findAndMoveForwardReceive(startSegment = receiveSegment.value, destSegmentId = r / SEGMENT_SIZE)
                 .getCell(index = (r % SEGMENT_SIZE).toInt())
             if (updateCellOnReceive(r, cell)) {
-                // The element was successfully received. Return the value,
-                // then clean the cell to avoid memory leaks
+                // The element was successfully received. Return the value, then clean the cell to avoid memory leaks
                 return cell.retrieveElement()
             }
         }
@@ -87,8 +85,7 @@ class RendezvousChannel<E> : Channel<E> {
                     return true
                 }
                 if (cell.casState(StateType.EMPTY, StateType.BROKEN)) {
-                    // The sender came, but the cell is empty. Clean the cell to avoid memory leaks.
-                    cell.cleanElement()
+                    // The sender came, but the cell is empty.
                     return false
                 }
                 if (cell.getState() == StateType.INTERRUPTED) {
@@ -116,12 +113,10 @@ class RendezvousChannel<E> : Channel<E> {
                 return true
             } else {
                 cell.casState(cont, StateType.BROKEN)
-                cell.cleanElement()
                 return false
             }
         }
         // The cell state was changed to INTERRUPTED during the rendezvous
-        cell.cleanElement()
         return false
     }
 
