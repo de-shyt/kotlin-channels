@@ -2,6 +2,7 @@ package com.deshyt
 
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
+import kotlinx.coroutines.CancellableContinuation
 
 class AtomicWaiter<E>(
     private val segment: ChannelSegment<E>
@@ -50,6 +51,22 @@ class AtomicWaiter<E>(
         setState(StateType.INTERRUPTED)
         cleanElement()
         segment.increaseInterruptedCellsCounter()
+    }
+
+    // ###########################
+    // # Validation of the state #
+    // ###########################
+
+    internal fun validate() {
+        // Check that the state is of valid type and there are no memory leaks
+        when (val state = getState()) {
+            StateType.EMPTY, StateType.DONE, StateType.BROKEN, StateType.INTERRUPTED -> {
+                check(getElement() == null) { "The state is ${state}, but the element is not null in $this." }
+            }
+            StateType.BUFFERED -> {}
+            is CancellableContinuation<*> -> {}
+            else -> error("Unexpected state $state in $this.")
+        }
     }
 }
 

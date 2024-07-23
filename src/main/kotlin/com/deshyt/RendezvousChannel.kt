@@ -23,16 +23,22 @@ class RendezvousChannel<E> : Channel<E> {
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(0)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
     }
 
     override suspend fun send(elem: E) {
         while (true) {
+            val startSegment = sendSegment.value
             val s = sendersCounter.getAndIncrement()
-            val cell = findAndMoveForwardSend(startSegment = sendSegment.value, destSegmentId = s / SEGMENT_SIZE)
-                .getCell(index = (s % SEGMENT_SIZE).toInt())
+            val segment = findAndMoveForwardSend(startSegment = startSegment, destSegmentId = s / SEGMENT_SIZE)
+            if (segment.id != s / SEGMENT_SIZE) {
+                // Skip the segment(s) with INTERRUPTED cells
+                sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
+                continue
+            }
+            val cell = segment.getCell(index = (s % SEGMENT_SIZE).toInt())
             cell.setElement(elem)
             if (updateCellOnSend(s, cell)) return
             cell.cleanElement()
@@ -63,9 +69,15 @@ class RendezvousChannel<E> : Channel<E> {
 
     override suspend fun receive(): E {
         while (true) {
+            val startSegment = receiveSegment.value
             val r = receiversCounter.getAndIncrement()
-            val cell = findAndMoveForwardReceive(startSegment = receiveSegment.value, destSegmentId = r / SEGMENT_SIZE)
-                .getCell(index = (r % SEGMENT_SIZE).toInt())
+            val segment = findAndMoveForwardReceive(startSegment = startSegment, destSegmentId = r / SEGMENT_SIZE)
+            if (segment.id != r / SEGMENT_SIZE) {
+                // The `receiveSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
+                receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
+                continue
+            }
+            val cell = segment.getCell(index = (r % SEGMENT_SIZE).toInt())
             if (updateCellOnReceive(r, cell)) {
                 // The element was successfully received. Return the value, then clean the cell to avoid memory leaks
                 return cell.retrieveElement()
@@ -155,82 +167,57 @@ class RendezvousChannel<E> : Channel<E> {
     }
 
     /*
-       Returns a segment which id is equal to the given `destSegmentId`.
-       If `startSegment != destSegment`, it means a new segment was created and `sendersCounter`
-       now points to it. The corresponding `sendSegment` pointer should be moved forward.
+       These methods return the first segment which contains non-interrupted cells and which
+       id >= the given `destSegmentId`. Depending on the request type, either `sendSegment` or
+       `receiveSegment` pointer is updated.
      */
     private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        val destSegment = findSegment(startSegment, destSegmentId)
-        // If `sendersCounter` moved to the next segment, update the pointer
+        val destSegment = startSegment.findSegment(destSegmentId)
+        // If `sendersCounter` moved to the next segment or removed segments were skipped, update the `sendSegment` pointer
         sendSegment.compareAndSet(startSegment, destSegment)
         return destSegment
     }
 
-    /*
-       Returns a segment which id is equal to the given `destSegmentId`.
-       If `startSegment != destSegment`, it means a new segment was created and `receiversCounter`
-       now points to it. The corresponding `receiveSegment` pointer should be moved forward.
-     */
     private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        val destSegment = findSegment(startSegment, destSegmentId)
+        val destSegment = startSegment.findSegment(destSegmentId)
+        // If `receiversCounter` moved to the next segment or removed segments were skipped, update the `receiveSegment` pointer
         receiveSegment.compareAndSet(startSegment, destSegment)
         return destSegment
     }
 
-    private fun findSegment(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        var curSegment = startSegment
-        while (curSegment.id < destSegmentId) {
-            val nextSegment = ChannelSegment<E>(curSegment.id + 1)
-            curSegment.next.compareAndSet(null, nextSegment)
-            curSegment = curSegment.next.value!!
-        }
-        return curSegment
-    }
+    // ###################################
+    // # Validation of the channel state #
+    // ###################################
 
     override fun checkSegmentStructureInvariants() {
         val firstSegment = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
+
+        // TODO Check that the leftmost segment does not have an active `prev` link
+//        check(firstSegment.getPrev() == null) {
+//            "All processed segments should be unreachable from the data structure, but the `prev` link of the leftmost segment is non-null.\n" +
+//            "Channel state: $this"
+//        }
+
         var curSegment: ChannelSegment<E>? = firstSegment
 
         while (curSegment != null) {
-            var interruptedCells = 0
-
-            for (i in 0 until SEGMENT_SIZE) {
-                val cell = curSegment.getCell(i)
-
-                // Check that the cell is bounded with the right segment
-                check(cell.getSegmentId() == curSegment.id) {
-                    "Segment ${curSegment!!.id}: the cell $i is bounded with the wrong segment.\n" +
-                    "Channel state: $this"
-                }
-
-                // Check that there are no memory leaks
-                when (val state = cell.getState()) {
-                    StateType.EMPTY, StateType.DONE, StateType.BROKEN, StateType.INTERRUPTED -> {
-                        check(cell.getElement() == null) {
-                            "Segment ${curSegment!!.id}: the cell $i is marked ${state}, but the element is not null.\n" +
-                            "Channel state: $this"
-                        }
-                        if (state == StateType.INTERRUPTED) {
-                            interruptedCells++
-                        }
-                    }
-                    StateType.BUFFERED -> {}
-                    is CancellableContinuation<*> -> {}
-                    else -> error(
-                        "Segment ${curSegment.id}: Unexpected state $state for the cell $i.\n" +
-                        "Channel state: $this"
-                    )
-                }
+            // Check that the segment's `prev` link is correct
+            if (curSegment != firstSegment) {
+                check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
+                check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
             }
 
-            // Check that the value of the segment's counter is correct
-            val segmentCounter = curSegment.getInterruptedCellsCounter()
-            check(interruptedCells == segmentCounter) {
-                "Segment ${curSegment!!.id}: the segment's counter ($segmentCounter) and the amount of interrupted cells ($interruptedCells) in the segment are different.\n" +
-                "Channel state: $this"
+            // TODO Check that the removed segments are not reachable from the list
+//            check(curSegment.isActive()) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+
+            // Check that the segment's state is correct
+            try {
+                curSegment.validate()
+            } catch (e: Exception) {
+                error("Channel $this:\n\t${e.message}")
             }
 
-            curSegment = curSegment.next.value
+            curSegment = curSegment.getNext()
         }
     }
 }
