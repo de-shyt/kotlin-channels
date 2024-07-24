@@ -31,7 +31,8 @@ class ChannelSegment<E>(
 
     internal fun getNext(): ChannelSegment<E>? = next.value
 
-    private fun casNext(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = next.compareAndSet(from, to)
+    // TODO make method private
+    internal fun casNext(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = next.compareAndSet(from, to)
 
     internal fun getPrev(): ChannelSegment<E>? = prev.value
 
@@ -63,10 +64,10 @@ class ChannelSegment<E>(
         check(updatedValue <= SEGMENT_SIZE) {
             "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)"
         }
-        // TODO physically remove the segment
-//        if (isRemoved()) {
-//            removeSegment()
-//        }
+        if (isRemoved()) {
+            // All cells are marked INTERRUPTED, physically remove the segment
+            removeSegment()
+        }
     }
 
     // #######################################################
@@ -92,8 +93,28 @@ class ChannelSegment<E>(
        This method removes the segment from the segment list.
      */
     private fun removeSegment() {
-        // TODO("Not implemented yet")
-        // use removal from MSQueueWithConstantTimeRemove
+        // Update links of neighbour segments
+        val prev = findPrev()
+        val next = getNext()
+        prev.casNext(this, next)
+//        next?.casPrev(this, prev)
+
+        if (next?.isRemoved() == true) {
+            next.removeSegment()
+        }
+
+        // Invalidate links in the removed segment
+        invalidateLinks()
+    }
+
+    private fun findPrev(): ChannelSegment<E> {
+        var cur = HEAD
+        while (cur.getNext() != this) {
+            cur = cur.getNext() ?: error("cur.id=${cur.id}, prev.id=${cur.getPrev()?.id ?: "null"}, next.id=${cur.getNext()?.id ?: "null"}\n" +
+            "this.id=${this.id}")
+
+        }
+        return cur as ChannelSegment<E>
     }
 
     // #####################################

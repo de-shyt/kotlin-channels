@@ -23,7 +23,11 @@ class RendezvousChannel<E> : Channel<E> {
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = HEAD as ChannelSegment<E>)
+        HEAD.casNext(null, firstSegment)
+        check(HEAD.id == -1L) { "HEAD.id is not -1" }
+        check(HEAD.getNext() != null) { "HEAD.next is null" }
+        check(HEAD.getNext()!!.id == 0L) { "HEAD.next.id is not 0" }
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
     }
@@ -173,15 +177,17 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
-        // If `sendersCounter` moved to the next segment or removed segments were skipped, update the `sendSegment` pointer
-        sendSegment.compareAndSet(startSegment, destSegment)
+        // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
+        val newSendSegment = startSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
+        sendSegment.compareAndSet(startSegment, newSendSegment)
         return destSegment
     }
 
     private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
-        // If `receiversCounter` moved to the next segment or removed segments were skipped, update the `receiveSegment` pointer
-        receiveSegment.compareAndSet(startSegment, destSegment)
+        // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
+        val newReceiveSegment = startSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
+        receiveSegment.compareAndSet(startSegment, newReceiveSegment)
         return destSegment
     }
 
@@ -207,8 +213,8 @@ class RendezvousChannel<E> : Channel<E> {
                 check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
             }
 
-            // TODO Check that the removed segments are not reachable from the list
-//            check(curSegment.isActive()) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            // Check that the removed segments are not reachable from the list
+            check(curSegment.isActive()) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
             try {
@@ -221,3 +227,6 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 }
+
+// Dummy segment in the segment list, it is used as the beginning of the list
+val HEAD = ChannelSegment<Any>(-1, null)
