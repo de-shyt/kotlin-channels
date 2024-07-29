@@ -7,7 +7,7 @@ import kotlinx.coroutines.CancellableContinuation
 class AtomicWaiter<E>(
     private val segment: ChannelSegment<E>
 ) {
-    private val state: AtomicRef<Any> = atomic(StateType.EMPTY)
+    private val state: AtomicRef<Any> = atomic(CellState.EMPTY)
     private var elem: E? = null
 
     internal fun getSegmentId() = segment.id
@@ -48,9 +48,9 @@ class AtomicWaiter<E>(
        corresponding segment about the cancellation by increasing the segment's counter.
      */
     internal fun onInterrupt() {
-        setState(StateType.INTERRUPTED)
+        setState(CellState.INTERRUPTED)
+        segment.onCellInterrupt()
         cleanElement()
-        segment.increaseInterruptedCellsCounter()
     }
 
     // ###########################
@@ -60,17 +60,17 @@ class AtomicWaiter<E>(
     internal fun validate() {
         // Check that the state is of valid type and there are no memory leaks
         when (val state = getState()) {
-            StateType.EMPTY, StateType.DONE, StateType.BROKEN, StateType.INTERRUPTED -> {
+            CellState.EMPTY, CellState.DONE, CellState.BROKEN, CellState.INTERRUPTED -> {
                 check(getElement() == null) { "The state is ${state}, but the element is not null in $this." }
             }
-            StateType.BUFFERED -> {}
+            CellState.BUFFERED -> {}
             is CancellableContinuation<*> -> {}
             else -> error("Unexpected state $state in $this.")
         }
     }
 }
 
-enum class StateType {
+enum class CellState {
     EMPTY, DONE, BUFFERED, BROKEN, INTERRUPTED
 }
 

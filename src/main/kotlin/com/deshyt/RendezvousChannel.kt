@@ -16,20 +16,33 @@ class RendezvousChannel<E> : Channel<E> {
     private val receiversCounter = atomic(0L)
 
     /*
-       The segment pointers indicate segments where values of `sendersCounter` and
+       The channel pointers indicate segments where values of `sendersCounter` and
        `receiversCounter` are currently located.
      */
-    private val sendSegment: AtomicRef<ChannelSegment<E>>
-    private val receiveSegment: AtomicRef<ChannelSegment<E>>
+    private val sendSegment: SegmentPointer<E>
+    private val receiveSegment: SegmentPointer<E>
+
+    // Dummy segment in the segment list, it is used as the beginning of the list
+    private val listHead = ChannelSegment<E>(-1, null, null)
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = HEAD as ChannelSegment<E>)
-        HEAD.casNext(null, firstSegment)
-        check(HEAD.id == -1L) { "HEAD.id is not -1" }
-        check(HEAD.getNext() != null) { "HEAD.next is null" }
-        check(HEAD.getNext()!!.id == 0L) { "HEAD.next.id is not 0" }
-        sendSegment = atomic(firstSegment)
-        receiveSegment = atomic(firstSegment)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = listHead, listHead = listHead)
+        listHead.casNext(null, firstSegment)
+
+        // Check segments' invariants
+        check(listHead.id == -1L) { "listHead.id is not -1" }
+        check(listHead.getNext() != null) { "listHead.next is null" }
+        check(firstSegment.id == 0L) { "firstSegment.id is not 0" }
+        check(firstSegment.getPrev() != null) { "firstSegment.prev is null" }
+
+        // Check listHead and firstSegment's bounds
+        check(listHead.getNext() == firstSegment) { "listHead.next (${listHead.getNext()}) is not firstSegment (${firstSegment})" }
+        check(listHead.getNext()!!.id == firstSegment.id) { "listHead.next.id (${listHead.getNext()!!.id}) is not firstSegment.id (${firstSegment.id})" }
+        check(firstSegment.getPrev() == listHead) { "firstSegment.prev (${firstSegment.getPrev()}) is not listHead (${listHead})" }
+        check(firstSegment.getPrev()!!.id == listHead.id) { "firstSegment.prev.id (${firstSegment.getPrev()!!.id}) is not listHead.id (${listHead.id})" }
+
+        sendSegment = SegmentPointer(firstSegment)
+        receiveSegment = SegmentPointer(firstSegment)
     }
 
     override suspend fun send(elem: E) {
@@ -56,11 +69,11 @@ class RendezvousChannel<E> : Channel<E> {
                     // The receiver is in the cell waiting for a rendezvous
                     return tryMakeRendezvous(cell)
                 }
-                if (cell.casState(StateType.EMPTY, StateType.BUFFERED)) {
+                if (cell.casState(CellState.EMPTY, CellState.BUFFERED)) {
                     // The receiver came, but its coroutine is not placed in the cell yet. Mark the cell BUFFERED.
                     return true
                 }
-                if (cell.getState() == StateType.BROKEN || cell.getState() == StateType.INTERRUPTED) {
+                if (cell.getState() == CellState.BROKEN || cell.getState() == CellState.INTERRUPTED) {
                     // The cell was marked BROKEN by the receiver or INTERRUPTED. Restart the sender.
                     return false
                 }
@@ -96,15 +109,15 @@ class RendezvousChannel<E> : Channel<E> {
                     // The sender is in the cell waiting for a rendezvous
                     return tryMakeRendezvous(cell)
                 }
-                if (cell.casState(StateType.BUFFERED, StateType.DONE)) {
+                if (cell.casState(CellState.BUFFERED, CellState.DONE)) {
                     // The element was placed in the cell by the sender
                     return true
                 }
-                if (cell.casState(StateType.EMPTY, StateType.BROKEN)) {
+                if (cell.casState(CellState.EMPTY, CellState.BROKEN)) {
                     // The sender came, but the cell is empty.
                     return false
                 }
-                if (cell.getState() == StateType.INTERRUPTED) {
+                if (cell.getState() == CellState.INTERRUPTED) {
                     // The cell was INTERRUPTED. Restart the receiver.
                     return false
                 }
@@ -125,10 +138,10 @@ class RendezvousChannel<E> : Channel<E> {
         val cont = cell.getState()
         if (cont is CancellableContinuation<*>) {
             if ((cont as CancellableContinuation<Boolean>).tryResumeRequest(true)) {
-                cell.casState(cont, StateType.DONE)
+                cell.casState(cont, CellState.DONE)
                 return true
             } else {
-                cell.casState(cont, StateType.BROKEN)
+                cell.casState(cont, CellState.BROKEN)
                 return false
             }
         }
@@ -147,7 +160,7 @@ class RendezvousChannel<E> : Channel<E> {
         return suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation { cell.onInterrupt() }
             // Try to place the coroutine in the cell.
-            if (!cell.casState(StateType.EMPTY, cont)) {
+            if (!cell.casState(CellState.EMPTY, cont)) {
                 // The cell is occupied by the opposite request. Resume the coroutine.
                 cont.tryResumeRequest(false)
             }
@@ -178,16 +191,14 @@ class RendezvousChannel<E> : Channel<E> {
     private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
-        val newSendSegment = startSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
-        sendSegment.compareAndSet(startSegment, newSendSegment)
+        sendSegment.moveForward(sendersCounter.value)
         return destSegment
     }
 
     private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
-        val newReceiveSegment = startSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
-        receiveSegment.compareAndSet(startSegment, newReceiveSegment)
+        receiveSegment.moveForward(receiversCounter.value)
         return destSegment
     }
 
@@ -226,7 +237,35 @@ class RendezvousChannel<E> : Channel<E> {
             curSegment = curSegment.getNext()
         }
     }
-}
 
-// Dummy segment in the segment list, it is used as the beginning of the list
-val HEAD = ChannelSegment<Any>(-1, null)
+    private class SegmentPointer<E>(
+        targetSegment: ChannelSegment<E>
+    ) {
+        private val segment: AtomicRef<ChannelSegment<E>> = atomic(targetSegment)
+
+        init {
+            // Mark that the segment is used by the channel pointer
+            segment.value.increaseUsedByChannelPointersCounter()
+        }
+
+        val value
+            get() = segment.value
+
+        fun moveForward(destSegmentId: Long) {
+            var from = segment.value
+            var to = from.getNext() ?: return
+            while (to.id < destSegmentId && !to.isRemoved()) {
+                to = to.getNext() ?: return
+            }
+            if (to.isRemoved()) return
+            if (segment.compareAndSet(from, to)) {
+                // The channel pointer was successfully moved to the further segment.
+                // Update `usedByChannelPointers` counters.
+                from.decreaseUsedByChannelPointersCounter()
+                to.increaseUsedByChannelPointersCounter()
+                return
+            }
+            return
+        }
+    }
+}
