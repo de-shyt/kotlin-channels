@@ -19,30 +19,13 @@ class RendezvousChannel<E> : Channel<E> {
        The channel pointers indicate segments where values of `sendersCounter` and
        `receiversCounter` are currently located.
      */
-    private val sendSegment: SegmentPointer<E>
-    private val receiveSegment: SegmentPointer<E>
-
-    // Dummy segment in the segment list, it is used as the beginning of the list
-    private val listHead = ChannelSegment<E>(-1, null, null)
+    private val sendSegment: AtomicRef<ChannelSegment<E>>
+    private val receiveSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = listHead, listHead = listHead)
-        listHead.casNext(null, firstSegment)
-
-        // Check segments' invariants
-        check(listHead.id == -1L) { "listHead.id is not -1" }
-        check(listHead.getNext() != null) { "listHead.next is null" }
-        check(firstSegment.id == 0L) { "firstSegment.id is not 0" }
-        check(firstSegment.getPrev() != null) { "firstSegment.prev is null" }
-
-        // Check listHead and firstSegment's bounds
-        check(listHead.getNext() == firstSegment) { "listHead.next (${listHead.getNext()}) is not firstSegment (${firstSegment})" }
-        check(listHead.getNext()!!.id == firstSegment.id) { "listHead.next.id (${listHead.getNext()!!.id}) is not firstSegment.id (${firstSegment.id})" }
-        check(firstSegment.getPrev() == listHead) { "firstSegment.prev (${firstSegment.getPrev()}) is not listHead (${listHead})" }
-        check(firstSegment.getPrev()!!.id == listHead.id) { "firstSegment.prev.id (${firstSegment.getPrev()!!.id}) is not listHead.id (${listHead.id})" }
-
-        sendSegment = SegmentPointer(firstSegment)
-        receiveSegment = SegmentPointer(firstSegment)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null, channel = this)
+        sendSegment = atomic(firstSegment)
+        receiveSegment = atomic(firstSegment)
     }
 
     override suspend fun send(elem: E) {
@@ -191,23 +174,51 @@ class RendezvousChannel<E> : Channel<E> {
     private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
-        sendSegment.moveForward(sendersCounter.value)
+        val newSendSegment = destSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
+        sendSegment.compareAndSet(startSegment, newSendSegment)
         return destSegment
     }
 
     private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
-        receiveSegment.moveForward(receiversCounter.value)
+        val newReceiveSegment = destSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
+        receiveSegment.compareAndSet(startSegment, newReceiveSegment)
         return destSegment
     }
+
+    /*
+       This method is used for linear segment removal. It returns a segment with id smaller
+       than the given [destSegmentId]. If such segment does not exist, it returns null.
+       The method is invoked in ChannelSegment<E>#removeSegment().
+     */
+//    internal fun findPrev(segmentId: Long): ChannelSegment<E>? {
+//        var cur = getFirstSegment()
+//        if (cur.id >= segmentId) return null
+//        var next = cur.getNext() ?: error("cur.id=${cur.id}, next.id=null")
+//        while (next.id < segmentId) {
+//            cur = next
+//            next = next.getNext() ?: error("cur.id=${cur.id}, next.id=null")
+//        }
+//        return cur
+//    }
+    internal fun findPrev(segmentId: Long): ChannelSegment<E>? {
+        var cur = getFirstSegment()
+        if (cur.id >= segmentId) return null
+        while (cur.getNext()!!.id < segmentId) {
+            cur = cur.getNext()!!
+        }
+        return cur
+    }
+
+    internal fun getFirstSegment(): ChannelSegment<E> = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
 
     // ###################################
     // # Validation of the channel state #
     // ###################################
 
     override fun checkSegmentStructureInvariants() {
-        val firstSegment = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
+        val firstSegment = getFirstSegment()
 
         // TODO Check that the leftmost segment does not have an active `prev` link
 //        check(firstSegment.getPrev() == null) {
@@ -218,54 +229,21 @@ class RendezvousChannel<E> : Channel<E> {
         var curSegment: ChannelSegment<E>? = firstSegment
 
         while (curSegment != null) {
-            // Check that the segment's `prev` link is correct
-            if (curSegment != firstSegment) {
-                check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
-                check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
-            }
+            // TODO Check that the segment's `prev` link is correct
+//            if (curSegment != firstSegment) {
+//                check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
+//                check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
+//            }
 
-            // Check that the removed segments are not reachable from the list
-            check(curSegment.isActive()) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            // Check that the removed segments are not reachable from the list.
+            // It is possible that the first segment is marked for removal, but reachable from the list. It means
+            // it is used by the channel pointer(s) and should not be removed physically.
+            check(curSegment.isActive() || curSegment == firstSegment) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
-            try {
-                curSegment.validate()
-            } catch (e: Exception) {
-                error("Channel $this:\n\t${e.message}")
-            }
+            curSegment.validate()
 
             curSegment = curSegment.getNext()
-        }
-    }
-
-    private class SegmentPointer<E>(
-        targetSegment: ChannelSegment<E>
-    ) {
-        private val segment: AtomicRef<ChannelSegment<E>> = atomic(targetSegment)
-
-        init {
-            // Mark that the segment is used by the channel pointer
-            segment.value.increaseUsedByChannelPointersCounter()
-        }
-
-        val value
-            get() = segment.value
-
-        fun moveForward(destSegmentId: Long) {
-            var from = segment.value
-            var to = from.getNext() ?: return
-            while (to.id < destSegmentId && !to.isRemoved()) {
-                to = to.getNext() ?: return
-            }
-            if (to.isRemoved()) return
-            if (segment.compareAndSet(from, to)) {
-                // The channel pointer was successfully moved to the further segment.
-                // Update `usedByChannelPointers` counters.
-                from.decreaseUsedByChannelPointersCounter()
-                to.increaseUsedByChannelPointersCounter()
-                return
-            }
-            return
         }
     }
 }
