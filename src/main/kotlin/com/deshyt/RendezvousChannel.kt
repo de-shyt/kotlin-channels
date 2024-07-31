@@ -19,30 +19,13 @@ class RendezvousChannel<E> : Channel<E> {
        The channel pointers indicate segments where values of `sendersCounter` and
        `receiversCounter` are currently located.
      */
-    private val sendSegment: SegmentPointer<E>
-    private val receiveSegment: SegmentPointer<E>
-
-    // Dummy segment in the segment list, it is used as the beginning of the list
-    private val listHead = ChannelSegment<E>(-1, null, null)
+    private val sendSegment: AtomicRef<ChannelSegment<E>>
+    private val receiveSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = listHead, listHead = listHead)
-        listHead.casNext(null, firstSegment)
-
-        // Check segments' invariants
-        check(listHead.id == -1L) { "listHead.id is not -1" }
-        check(listHead.getNext() != null) { "listHead.next is null" }
-        check(firstSegment.id == 0L) { "firstSegment.id is not 0" }
-        check(firstSegment.getPrev() != null) { "firstSegment.prev is null" }
-
-        // Check listHead and firstSegment's bounds
-        check(listHead.getNext() == firstSegment) { "listHead.next (${listHead.getNext()}) is not firstSegment (${firstSegment})" }
-        check(listHead.getNext()!!.id == firstSegment.id) { "listHead.next.id (${listHead.getNext()!!.id}) is not firstSegment.id (${firstSegment.id})" }
-        check(firstSegment.getPrev() == listHead) { "firstSegment.prev (${firstSegment.getPrev()}) is not listHead (${listHead})" }
-        check(firstSegment.getPrev()!!.id == listHead.id) { "firstSegment.prev.id (${firstSegment.getPrev()!!.id}) is not listHead.id (${listHead.id})" }
-
-        sendSegment = SegmentPointer(firstSegment)
-        receiveSegment = SegmentPointer(firstSegment)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null, channel = this)
+        sendSegment = atomic(firstSegment)
+        receiveSegment = atomic(firstSegment)
     }
 
     override suspend fun send(elem: E) {
@@ -191,16 +174,20 @@ class RendezvousChannel<E> : Channel<E> {
     private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
-        sendSegment.moveForward(sendersCounter.value)
+        val newSendSegment = destSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
+        sendSegment.compareAndSet(startSegment, newSendSegment)
         return destSegment
     }
 
     private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
-        receiveSegment.moveForward(receiversCounter.value)
+        val newReceiveSegment = destSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
+        receiveSegment.compareAndSet(startSegment, newReceiveSegment)
         return destSegment
     }
+
+    internal fun listHead(): ChannelSegment<E> = listOf(sendSegment.value, receiveSegment.value).minBy { it.id }
 
     // ###################################
     // # Validation of the channel state #
@@ -235,37 +222,6 @@ class RendezvousChannel<E> : Channel<E> {
             }
 
             curSegment = curSegment.getNext()
-        }
-    }
-
-    private class SegmentPointer<E>(
-        targetSegment: ChannelSegment<E>
-    ) {
-        private val segment: AtomicRef<ChannelSegment<E>> = atomic(targetSegment)
-
-        init {
-            // Mark that the segment is used by the channel pointer
-            segment.value.increaseUsedByChannelPointersCounter()
-        }
-
-        val value
-            get() = segment.value
-
-        fun moveForward(destSegmentId: Long) {
-            var from = segment.value
-            var to = from.getNext() ?: return
-            while (to.id < destSegmentId && !to.isRemoved()) {
-                to = to.getNext() ?: return
-            }
-            if (to.isRemoved()) return
-            if (segment.compareAndSet(from, to)) {
-                // The channel pointer was successfully moved to the further segment.
-                // Update `usedByChannelPointers` counters.
-                from.decreaseUsedByChannelPointersCounter()
-                to.increaseUsedByChannelPointersCounter()
-                return
-            }
-            return
         }
     }
 }
