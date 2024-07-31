@@ -187,30 +187,6 @@ class RendezvousChannel<E> : Channel<E> {
         return destSegment
     }
 
-    /*
-       This method is used for linear segment removal. It returns a segment with id smaller
-       than the given [destSegmentId]. If such segment does not exist, it returns null.
-       The method is invoked in ChannelSegment<E>#removeSegment().
-     */
-//    internal fun findPrev(segmentId: Long): ChannelSegment<E>? {
-//        var cur = getFirstSegment()
-//        if (cur.id >= segmentId) return null
-//        var next = cur.getNext() ?: error("cur.id=${cur.id}, next.id=null")
-//        while (next.id < segmentId) {
-//            cur = next
-//            next = next.getNext() ?: error("cur.id=${cur.id}, next.id=null")
-//        }
-//        return cur
-//    }
-    internal fun findPrev(segmentId: Long): ChannelSegment<E>? {
-        var cur = getFirstSegment()
-        if (cur.id >= segmentId) return null
-        while (cur.getNext()!!.id < segmentId) {
-            cur = cur.getNext()!!
-        }
-        return cur
-    }
-
     internal fun getFirstSegment(): ChannelSegment<E> = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
 
     // ###################################

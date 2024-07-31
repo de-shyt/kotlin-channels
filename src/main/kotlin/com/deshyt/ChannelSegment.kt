@@ -8,12 +8,12 @@ import kotlinx.atomicfu.atomic
  * Each segment has its own [id], which increases from the beginning.
  *
  * The structure of the segment list is manipulated inside the methods [findSegment]
- * and [removeSegment] and cannot be changed from the outside.
+ * and [tryRemoveSegment] and cannot be changed from the outside.
  */
 class ChannelSegment<E>(
     val id: Long,
     prevSegment: ChannelSegment<E>?,
-    private val channel: RendezvousChannel<E> // this reference is temporary. Needed for invoking [findPrev] method
+    private val channel: RendezvousChannel<E> // this reference is temporary. Needed in [findPrev] method
 ) {
     private val next: AtomicRef<ChannelSegment<E>?> = atomic(null)
 //    private val prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment) // TODO add `prev` link
@@ -105,10 +105,32 @@ class ChannelSegment<E>(
             return
         }
         // Update links of neighbouring segments
-        val prev = channel.findPrev(this.id)
+        val prev = findPrev(this.id)
         val next = getNext()
         prev?.casNext(this, next)
 //        next?.casPrev(this, prev)  // TODO update cur.next.prev link
+    }
+
+    /*
+       This method is used for linear segment removal. It returns a segment with id smaller
+       than the given [destSegmentId]. If such segment does not exist, it returns null.
+       The method is invoked in ChannelSegment<E>#removeSegment().
+     */
+    private fun findPrev(segmentId: Long): ChannelSegment<E>? {
+        var cur = channel.getFirstSegment()
+        if (cur.id >= segmentId) return null
+
+        while (cur.getNext() != null && cur.getNext()!!.id < segmentId) { // TODO getNext() should not be null here
+            cur = cur.getNext()!!
+        }
+        return cur
+
+//        var next = cur.getNext() ?: error("cur.id=${cur.id}, next.id=null")
+//        while (next.id < segmentId) {
+//            cur = next
+//            next = next.getNext() ?: error("cur.id=${cur.id}, next.id=null")
+//        }
+//        return cur
     }
 
     override fun toString(): String = super.toString() + "(id=$id)"
