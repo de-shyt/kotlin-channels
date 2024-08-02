@@ -34,8 +34,8 @@ class RendezvousChannel<E> : Channel<E> {
             val s = sendersCounter.getAndIncrement()
             val segment = findAndMoveForwardSend(startSegment = startSegment, destSegmentId = s / SEGMENT_SIZE)
             if (segment.id != s / SEGMENT_SIZE) {
-                // Skip the segment(s) with INTERRUPTED cells
-                sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
+                // The `sendSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
+                sendersCounter.compareAndSet(s + 1, sendSegment.value.id * SEGMENT_SIZE)
                 continue
             }
             val cell = segment.getCell(index = (s % SEGMENT_SIZE).toInt())
@@ -74,7 +74,7 @@ class RendezvousChannel<E> : Channel<E> {
             val segment = findAndMoveForwardReceive(startSegment = startSegment, destSegmentId = r / SEGMENT_SIZE)
             if (segment.id != r / SEGMENT_SIZE) {
                 // The `receiveSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
+                receiversCounter.compareAndSet(r + 1, receiveSegment.value.id * SEGMENT_SIZE)
                 continue
             }
             val cell = segment.getCell(index = (r % SEGMENT_SIZE).toInt())
@@ -176,6 +176,7 @@ class RendezvousChannel<E> : Channel<E> {
         // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
         val newSendSegment = destSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
         sendSegment.compareAndSet(startSegment, newSendSegment)
+        skipInterruptedSegmentsForSend()
         return destSegment
     }
 
@@ -184,7 +185,38 @@ class RendezvousChannel<E> : Channel<E> {
         // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
         val newReceiveSegment = destSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
         receiveSegment.compareAndSet(startSegment, newReceiveSegment)
+        skipInterruptedSegmentsForReceive()
         return destSegment
+    }
+
+    /*
+       This method is invoked in either [findAndMoveForwardSend] or [findAndMoveForwardReceive].
+       It handles the situation when the pointer of the opposite request moved further in the
+       segment list, and some segments between the pointers were removed.
+       It is guaranteed that the pointer will stop at the first non-interrupted segment, since
+       the pointer of the opposite request is somewhere further pointing to a non-interrupted
+       segment.
+     */
+    private fun skipInterruptedSegmentsForSend() {
+        while (true) {
+            val cur = sendSegment.value
+            if (cur.isActive()) {
+                break
+            }
+            val next = cur.getNext() ?: error("The channel pointer was moved to null.")
+            sendSegment.compareAndSet(cur, next)
+        }
+    }
+
+    private fun skipInterruptedSegmentsForReceive() {
+        while (true) {
+            val cur = receiveSegment.value
+            if (cur.isActive()) {
+                break
+            }
+            val next = cur.getNext() ?: error("The channel pointer was moved to null.")
+            receiveSegment.compareAndSet(cur, next)
+        }
     }
 
     internal fun getFirstSegment(): ChannelSegment<E> = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }

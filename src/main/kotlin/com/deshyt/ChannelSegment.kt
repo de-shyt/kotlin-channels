@@ -105,32 +105,32 @@ class ChannelSegment<E>(
             return
         }
         // Update links of neighbouring segments
-        val prev = findPrev(this.id)
+        val prev = findPrev()
         val next = getNext()
         prev?.casNext(this, next)
 //        next?.casPrev(this, prev)  // TODO update cur.next.prev link
     }
 
     /*
-       This method is used for linear segment removal. It returns a segment with id smaller
-       than the given [destSegmentId]. If such segment does not exist, it returns null.
+       This method is used for linear segment removal. It returns a segment with id smaller than
+       `this.id` or null if `this` segment was already removed from the segment list.
        The method is invoked in ChannelSegment<E>#removeSegment().
      */
-    private fun findPrev(segmentId: Long): ChannelSegment<E>? {
-        var cur = channel.getFirstSegment()
-        if (cur.id >= segmentId) return null
-
-        while (cur.getNext() != null && cur.getNext()!!.id < segmentId) { // TODO getNext() should not be null here
-            cur = cur.getNext()!!
+    private fun findPrev(): ChannelSegment<E>? {
+        val firstSegment = channel.getFirstSegment()
+        if (this.id <= firstSegment.id) {
+            /* Method is invoked on the leftmost segment which does not have `prev` link, return null */
+            return null
+        }
+        /* Iterate over the segment list until `cur.getNext() == this`. The condition might not be
+           met if the current segment was removed by invoking `tryRemoveSegment()` from another
+           segment. In this case, null is returned. */
+        var cur = firstSegment
+        while (cur.getNext() != this) {
+            cur = cur.getNext() ?: return null
+            if (cur.id > this.id) return null
         }
         return cur
-
-//        var next = cur.getNext() ?: error("cur.id=${cur.id}, next.id=null")
-//        while (next.id < segmentId) {
-//            cur = next
-//            next = next.getNext() ?: error("cur.id=${cur.id}, next.id=null")
-//        }
-//        return cur
     }
 
     override fun toString(): String = super.toString() + "(id=$id)"
@@ -151,7 +151,7 @@ class ChannelSegment<E>(
                 getCell(i).validate()
             } catch (e: Exception) {
                 error("Segment $this: ${e.message}")
-            } 
+            }
 
             // Count the actual amount of interrupted cells
             if (getCell(i).getState() == CellState.INTERRUPTED) interruptedCells++
