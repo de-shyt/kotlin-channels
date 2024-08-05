@@ -175,8 +175,12 @@ class RendezvousChannel<E> : Channel<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
         val newSendSegment = destSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
-        sendSegment.compareAndSet(startSegment, newSendSegment)
-        skipInterruptedSegmentsForSend()
+        while (true) {
+            val cur = sendSegment.value
+            if (cur.id >= newSendSegment.id) break
+            if (sendSegment.compareAndSet(cur, newSendSegment)) break
+        }
+//        skipInterruptedSegmentsForSend()
         return destSegment
     }
 
@@ -184,8 +188,12 @@ class RendezvousChannel<E> : Channel<E> {
         val destSegment = startSegment.findSegment(destSegmentId)
         // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
         val newReceiveSegment = destSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
-        receiveSegment.compareAndSet(startSegment, newReceiveSegment)
-        skipInterruptedSegmentsForReceive()
+        while (true) {
+            val cur = receiveSegment.value
+            if (cur.id >= newReceiveSegment.id) break
+            if (receiveSegment.compareAndSet(cur, newReceiveSegment)) break
+        }
+//        skipInterruptedSegmentsForReceive()
         return destSegment
     }
 
@@ -197,7 +205,7 @@ class RendezvousChannel<E> : Channel<E> {
        the pointer of the opposite request is somewhere further pointing to a non-interrupted
        segment.
      */
-    private fun skipInterruptedSegmentsForSend() {
+    fun skipInterruptedSegmentsForSend() {
         while (true) {
             val cur = sendSegment.value
             if (cur.isActive()) {
@@ -208,7 +216,7 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    private fun skipInterruptedSegmentsForReceive() {
+    fun skipInterruptedSegmentsForReceive() {
         while (true) {
             val cur = receiveSegment.value
             if (cur.isActive()) {

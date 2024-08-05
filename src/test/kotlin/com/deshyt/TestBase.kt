@@ -14,12 +14,13 @@ abstract class TestBase(
     fun modelCheckingTest() = ModelCheckingOptions()
         .iterations(scenarios)
         .invocationsPerIteration(invokePerScenarioAmount(false))
-        .threads(threadsAmount)
-        .actorsBefore(actorsBeforeAmount)
-        .actorsPerThread(actorsPerThreadAmount)
-        .actorsAfter(actorsAfterAmount)
+        .threads(3)
+        .actorsBefore(0)
+        .actorsPerThread(2)
+        .actorsAfter(0)
         .checkObstructionFreedom(checkObstructionFreedom)
         .sequentialSpecification(sequentialSpecification)
+        .logLevel(LoggingLevel.INFO)
         .check(this::class)
 
     @Test

@@ -93,22 +93,18 @@ class ChannelSegment<E>(
             // All cells were interrupted. Physically remove the segment.
             removeSegment()
         }
-        getNext()?.tryRemoveSegment()
     }
 
     /*
        This method physically removes the segment from the segment list.
      */
     private fun removeSegment() {
-        if (this == channel.getFirstSegment()) {
-            // The first segment cannot be removed, it is used by the channel pointer.
-            return
-        }
-        // Update links of neighbouring segments
-        val prev = findPrev()
-        val next = getNext()
-        prev?.casNext(this, next)
-//        next?.casPrev(this, prev)  // TODO update cur.next.prev link
+        val curNext = next.value ?: return
+        val curPrev = findPrev() ?: return
+        curPrev.next.value = curNext
+//        curNext.prev.setIfNotNull(curPrev)
+        if (curPrev.isInterrupted()) curPrev.removeSegment()
+        if (curNext.isInterrupted()) curNext.removeSegment()
     }
 
     /*
@@ -133,7 +129,7 @@ class ChannelSegment<E>(
         return cur
     }
 
-    override fun toString(): String = super.toString() + "(id=$id)"
+    override fun toString(): String = "Segment(id=$id)"
 
     // #####################################
     // # Validation of the segment's state #
@@ -176,4 +172,4 @@ class ChannelSegment<E>(
     }
 }
 
-const val SEGMENT_SIZE = 2
+const val SEGMENT_SIZE = 1
