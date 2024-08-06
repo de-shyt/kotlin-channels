@@ -13,10 +13,9 @@ import kotlinx.atomicfu.atomic
 class ChannelSegment<E>(
     val id: Long,
     prevSegment: ChannelSegment<E>?,
-    private val channel: RendezvousChannel<E> // this reference is temporary. Needed in [findPrev] method
 ) {
     private val next: AtomicRef<ChannelSegment<E>?> = atomic(null)
-//    private val prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment) // TODO add `prev` link
+    private val prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment)
 
     private val cells = List(SEGMENT_SIZE) { AtomicWaiter(this) }
 
@@ -34,9 +33,9 @@ class ChannelSegment<E>(
 
     private fun casNext(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = next.compareAndSet(from, to)
 
-//    internal fun getPrev(): ChannelSegment<E>? = prev.value
+    internal fun getPrev(): ChannelSegment<E>? = prev.value
 
-//    private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
+    private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
 
     internal fun getCell(index: Int): AtomicWaiter<E> = cells[index]
 
@@ -45,7 +44,7 @@ class ChannelSegment<E>(
        cells are were interrupted. [isRemoved] method is used to check this condition.
     */
     internal fun isRemoved(): Boolean = interruptedCellsCounter() == SEGMENT_SIZE
-    internal fun isActive(): Boolean = !isRemoved()
+    internal fun isAlive(): Boolean = !isRemoved()
 
     /*
        This method is used to update `interruptedCellsCounter`. The counter increases when the
@@ -75,7 +74,7 @@ class ChannelSegment<E>(
     internal fun findSegment(destSegmentId: Long): ChannelSegment<E> {
         var curSegment = this
         while (curSegment.isRemoved() || curSegment.id < destSegmentId) {
-            val nextSegment = ChannelSegment(id = curSegment.id + 1, prevSegment = curSegment, channel = channel)
+            val nextSegment = ChannelSegment(id = curSegment.id + 1, prevSegment = curSegment)
             if (curSegment.casNext(null, nextSegment)) {
                 // The tail was updated. Check if the old tail should be removed.
                 curSegment.tryRemoveSegment()
@@ -95,40 +94,47 @@ class ChannelSegment<E>(
             // There are non-interrupted cells, no need to remove the segment.
             return
         }
-        // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
-        val next = getNext() ?: return
-        val prev = findPrev()
+        if (getNext() == null) {
+            // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
+            return
+        }
+        // Find the closest non-removed segments on the left and on the right
+        val prev = aliveSegmentLeft()
+        val next = aliveSegmentRight()
 
+        // Update the links
         prev?.casNext(this, next)
-//         next.casPrev(this, prev) // TODO update `cur.next.prev` link
+        next.casPrev(this, prev)
 
         next.tryRemoveSegment()
         prev?.tryRemoveSegment()
     }
 
     /*
-       This method is used for linear segment removal. It returns a segment with id smaller than
-       `this.id` or null if `this` segment was already removed from the segment list.
-       The method is invoked in ChannelSegment<E>#removeSegment().
+       This method is used to find the closest alive segment on the left from this segment.
+       If such a segment does not exist, `null` is returned.
      */
-    private fun findPrev(): ChannelSegment<E>? {
-        val firstSegment = channel.getFirstSegment()
-        if (this.id <= firstSegment.id) {
-            /* Method is invoked on the leftmost segment which does not have `prev` link, return null */
-            return null
-        }
-        /* Iterate over the segment list until `cur.getNext() == this`. The condition might not be
-           met if the current segment was removed by invoking `tryRemoveSegment()` from another
-           segment. In this case, null is returned. */
-        var cur = firstSegment
-        while (cur.getNext() != this) {
-            cur = cur.getNext() ?: return null
-            if (cur.id > this.id) return null
+    private fun aliveSegmentLeft(): ChannelSegment<E>? {
+        var cur = getPrev()
+        while (cur != null && cur.isRemoved()) {
+            cur = cur.getPrev()
         }
         return cur
     }
 
-    override fun toString(): String = super.toString() + "(id=$id)"
+    /*
+       This method is used to find the closest alive segment on the right from this segment.
+       The tail segment is returned, if the end of the segment list is reached.
+     */
+    private fun aliveSegmentRight(): ChannelSegment<E> {
+        var cur = getNext()
+        while (cur!!.isRemoved() && cur.getNext() != null) {
+            cur = cur.getNext()
+        }
+        return cur
+    }
+
+    override fun toString(): String = "ChannelSegment(id=$id)"
 
     // #####################################
     // # Validation of the segment's state #
@@ -158,7 +164,7 @@ class ChannelSegment<E>(
 
         // Check that the segment's state is correct
         when (interruptedCells.compareTo(SEGMENT_SIZE)) {
-            -1 -> check(isActive()) { "Segment $this: there are non-interrupted cells, but the segment is logically removed." }
+            -1 -> check(isAlive()) { "Segment $this: there are non-interrupted cells, but the segment is logically removed." }
             0 -> {
                 check(isRemoved()) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
                 // Check that the state of each cell is INTERRUPTED

@@ -23,7 +23,7 @@ class RendezvousChannel<E> : Channel<E> {
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null, channel = this)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
     }
@@ -233,8 +233,6 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    internal fun getFirstSegment(): ChannelSegment<E> = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
-
     // ###################################
     // # Validation of the channel state #
     // ###################################
@@ -242,31 +240,49 @@ class RendezvousChannel<E> : Channel<E> {
     override fun checkSegmentStructureInvariants() {
         val firstSegment = getFirstSegment()
 
-        // TODO Check that the leftmost segment does not have an active `prev` link
-//        check(firstSegment.getPrev() == null) {
-//            "All processed segments should be unreachable from the data structure, but the `prev` link of the leftmost segment is non-null.\n" +
-//            "Channel state: $this"
-//        }
+        /* Check that the `prev` link of the leftmost segment is correct. The link can be non-null, if it points
+           to the segment which cells were all used by the requests and not all of them were interrupted. */
+        val prev = firstSegment.getPrev()
+        check(prev == null || !prev.isRemoved()) { "Channel $this: the `prev` link of the leftmost segment is not null." }
 
         var curSegment: ChannelSegment<E>? = firstSegment
-
         while (curSegment != null) {
-            // TODO Check that the segment's `prev` link is correct
-//            if (curSegment != firstSegment) {
-//                check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
-//                check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
-//            }
+            // Check that the segment's `prev` link is correct
+            if (curSegment != firstSegment) {
+                check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
+                check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
+            }
 
             // Check that the removed segments are not reachable from the list.
-            check(curSegment.isActive()
-                    || curSegment.getNext() == null  // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
-                    || curSegment == firstSegment)   // The first segment cannot be removed physically, since it is used by the channel pointer
-            { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
+            check(curSegment.isAlive() || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
             curSegment.validate()
 
             curSegment = curSegment.getNext()
         }
+    }
+
+    /*
+       This method returns the leftmost segment in the segment list.
+       It handles the situation when one pointer was moved further, the other pointer remained
+       the same and segments between the pointers were removed:
+
+                         REMOVED             REMOVED
+                        ┌───────┐ ────────► ┌───────┐ ────────► ┌───────┐
+                        └───────┘ null◄──── └───────┘ null◄──── └───────┘
+                            ▲                                       ▲
+                            │                                       │
+                         `receiveSegment`                        `sendSegment`
+
+       In this case, the leftmost segment is the first alive one or the tail.
+     */
+    private fun getFirstSegment(): ChannelSegment<E> {
+        var cur = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
+        while (cur.isRemoved() && cur.getNext() != null) {
+            cur = cur.getNext()!!
+        }
+        return cur
     }
 }
