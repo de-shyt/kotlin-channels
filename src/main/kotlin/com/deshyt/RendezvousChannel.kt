@@ -35,7 +35,7 @@ class RendezvousChannel<E> : Channel<E> {
             val segment = findAndMoveForwardSend(startSegment = startSegment, destSegmentId = s / SEGMENT_SIZE)
             if (segment.id != s / SEGMENT_SIZE) {
                 // The `sendSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                sendersCounter.compareAndSet(s + 1, sendSegment.value.id * SEGMENT_SIZE)
+                sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
             val cell = segment.getCell(index = (s % SEGMENT_SIZE).toInt())
@@ -74,7 +74,7 @@ class RendezvousChannel<E> : Channel<E> {
             val segment = findAndMoveForwardReceive(startSegment = startSegment, destSegmentId = r / SEGMENT_SIZE)
             if (segment.id != r / SEGMENT_SIZE) {
                 // The `receiveSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                receiversCounter.compareAndSet(r + 1, receiveSegment.value.id * SEGMENT_SIZE)
+                receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
             val cell = segment.getCell(index = (r % SEGMENT_SIZE).toInt())
@@ -168,54 +168,68 @@ class RendezvousChannel<E> : Channel<E> {
 
     /*
        These methods return the first segment which contains non-interrupted cells and which
-       id >= the given `destSegmentId`. Depending on the request type, either `sendSegment` or
+       id >= the requested `destSegmentId`. Depending on the request type, either `sendSegment` or
        `receiveSegment` pointer is updated.
      */
     private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        val destSegment = startSegment.findSegment(destSegmentId)
-        // If `sendersCounter` moved to the further segment, update the `sendSegment` pointer
-        val newSendSegment = destSegment.findSegment(sendersCounter.value / SEGMENT_SIZE)
-        sendSegment.compareAndSet(startSegment, newSendSegment)
-        skipInterruptedSegmentsForSend()
-        return destSegment
-    }
-
-    private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        val destSegment = startSegment.findSegment(destSegmentId)
-        // If `receiversCounter` moved to the further segment, update the `receiveSegment` pointer
-        val newReceiveSegment = destSegment.findSegment(receiversCounter.value / SEGMENT_SIZE)
-        receiveSegment.compareAndSet(startSegment, newReceiveSegment)
-        skipInterruptedSegmentsForReceive()
-        return destSegment
-    }
-
-    /*
-       This method is invoked in either [findAndMoveForwardSend] or [findAndMoveForwardReceive].
-       It handles the situation when the pointer of the opposite request moved further in the
-       segment list, and some segments between the pointers were removed.
-       It is guaranteed that the pointer will stop at the first non-interrupted segment, since
-       the pointer of the opposite request is somewhere further pointing to a non-interrupted
-       segment.
-     */
-    private fun skipInterruptedSegmentsForSend() {
         while (true) {
-            val cur = sendSegment.value
-            if (cur.isActive()) {
-                break
+            val destSegment = startSegment.findSegment(destSegmentId)
+            // Try to update `sendSegment` and restart if the found segment is logically removed
+            if (moveForwardSend(destSegment)) {
+                return destSegment
             }
-            val next = cur.getNext() ?: error("The channel pointer was moved to null.")
-            sendSegment.compareAndSet(cur, next)
         }
     }
 
-    private fun skipInterruptedSegmentsForReceive() {
+    private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+        while (true) {
+            val destSegment = startSegment.findSegment(destSegmentId)
+            // Try to update `sendSegment` and restart if the found segment is logically removed
+            if (moveForwardReceive(destSegment)) {
+                return destSegment
+            }
+        }
+    }
+
+    /*
+       These methods help moving the pointers forward.
+       If the pointer is being moved to the segment which is logically removed, the method
+       returns false, thus forcing [findAndMoveForwardSend] (or [findAndMoveForwardReceive])
+       method to restart.
+     */
+    private fun moveForwardSend(to: ChannelSegment<E>): Boolean {
+        while (true) {
+            val cur = sendSegment.value
+            if (cur.id >= to.id) {
+                // No need to update the pointer, it was already updated by another request.
+                return true
+            }
+            if (to.isRemoved()) {
+                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardSend].
+                return false
+            }
+            if (sendSegment.compareAndSet(cur, to)) {
+                cur.tryRemoveSegment()
+                return true
+            }
+        }
+    }
+
+    private fun moveForwardReceive(to: ChannelSegment<E>): Boolean {
         while (true) {
             val cur = receiveSegment.value
-            if (cur.isActive()) {
-                break
+            if (cur.id >= to.id) {
+                // No need to update the pointer, it was already updated by another request.
+                return true
             }
-            val next = cur.getNext() ?: error("The channel pointer was moved to null.")
-            receiveSegment.compareAndSet(cur, next)
+            if (to.isRemoved()) {
+                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardReceive].
+                return false
+            }
+            if (receiveSegment.compareAndSet(cur, to)) {
+                cur.tryRemoveSegment()
+                return true
+            }
         }
     }
 
@@ -244,9 +258,10 @@ class RendezvousChannel<E> : Channel<E> {
 //            }
 
             // Check that the removed segments are not reachable from the list.
-            // It is possible that the first segment is marked for removal, but reachable from the list. It means
-            // it is used by the channel pointer(s) and should not be removed physically.
-            check(curSegment.isActive() || curSegment == firstSegment) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            check(curSegment.isActive()
+                    || curSegment.getNext() == null  // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
+                    || curSegment == firstSegment)   // The first segment cannot be removed physically, since it is used by the channel pointer
+            { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
             curSegment.validate()

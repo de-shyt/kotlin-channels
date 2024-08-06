@@ -42,10 +42,10 @@ class ChannelSegment<E>(
 
     /*
        These methods show the state of the segment. The segment is logically removed if all its
-       cells are were interrupted. [isInterrupted] method is used to check this condition.
+       cells are were interrupted. [isRemoved] method is used to check this condition.
     */
-    internal fun isInterrupted(): Boolean = interruptedCellsCounter() == SEGMENT_SIZE
-    internal fun isActive(): Boolean = !isInterrupted()
+    internal fun isRemoved(): Boolean = interruptedCellsCounter() == SEGMENT_SIZE
+    internal fun isActive(): Boolean = !isRemoved()
 
     /*
        This method is used to update `interruptedCellsCounter`. The counter increases when the
@@ -69,15 +69,17 @@ class ChannelSegment<E>(
     // #######################################################
 
     /*
-       This method looks for a segment with the specified id. If there are segments which are
-       marked removed, they are skipped. The search finishes when it finds the first segment
-       with non-interrupted cells and id >= destSegmentId.
+       This method looks for a segment with id equal to or greater than the requested id.
+       If there are segments which are marked removed, they are skipped.
      */
     internal fun findSegment(destSegmentId: Long): ChannelSegment<E> {
         var curSegment = this
-        while (curSegment.isInterrupted() || curSegment.id < destSegmentId) {
+        while (curSegment.isRemoved() || curSegment.id < destSegmentId) {
             val nextSegment = ChannelSegment(id = curSegment.id + 1, prevSegment = curSegment, channel = channel)
-            curSegment.casNext(null, nextSegment)
+            if (curSegment.casNext(null, nextSegment)) {
+                // The tail was updated. Check if the old tail should be removed.
+                curSegment.tryRemoveSegment()
+            }
             curSegment = curSegment.getNext()!!
         }
         return curSegment
@@ -88,27 +90,20 @@ class ChannelSegment<E>(
        checks if all cells in the segment were interrupted. Then, in case it is true, it removes
        the segment physically by updating the neighbours' `prev` and `next` links.
      */
-    private fun tryRemoveSegment() {
-        if (isInterrupted()) {
-            // All cells were interrupted. Physically remove the segment.
-            removeSegment()
-        }
-        getNext()?.tryRemoveSegment()
-    }
-
-    /*
-       This method physically removes the segment from the segment list.
-     */
-    private fun removeSegment() {
-        if (this == channel.getFirstSegment()) {
-            // The first segment cannot be removed, it is used by the channel pointer.
+    internal fun tryRemoveSegment() {
+        if (!isRemoved()) {
+            // There are non-interrupted cells, no need to remove the segment.
             return
         }
-        // Update links of neighbouring segments
+        // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
+        val next = getNext() ?: return
         val prev = findPrev()
-        val next = getNext()
+
         prev?.casNext(this, next)
-//        next?.casPrev(this, prev)  // TODO update cur.next.prev link
+//         next.casPrev(this, prev) // TODO update `cur.next.prev` link
+
+        next.tryRemoveSegment()
+        prev?.tryRemoveSegment()
     }
 
     /*
@@ -165,7 +160,7 @@ class ChannelSegment<E>(
         when (interruptedCells.compareTo(SEGMENT_SIZE)) {
             -1 -> check(isActive()) { "Segment $this: there are non-interrupted cells, but the segment is logically removed." }
             0 -> {
-                check(isInterrupted()) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
+                check(isRemoved()) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
                 // Check that the state of each cell is INTERRUPTED
                 for (i in 0 until SEGMENT_SIZE) {
                     check(getCell(i).getState() == CellState.INTERRUPTED) { "Segment $this: the segment is logically removed, but the cell $i is not marked INTERRUPTED." }
