@@ -2,6 +2,7 @@ package com.deshyt
 
 import org.jetbrains.kotlinx.lincheck.annotations.Operation
 import org.jetbrains.kotlinx.lincheck.annotations.Param
+import org.jetbrains.kotlinx.lincheck.annotations.Validate
 import org.jetbrains.kotlinx.lincheck.paramgen.IntGen
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -46,11 +47,11 @@ abstract class ChannelTestBase(
 
 //    @StateRepresentation
 //    fun state() = (c as? BufferedChannel<*>)?.toStringDebug() ?: c.toString()
-//
-//    @Validate
-//    fun validate() {
-//        (c as? BufferedChannel<*>)?.checkSegmentStructureInvariants()
-//    }
+
+    @Validate
+    fun validate() {
+        c.checkSegmentStructureInvariants()
+    }
 }
 
 private class NumberedCancellationException(number: Int) : CancellationException() {
