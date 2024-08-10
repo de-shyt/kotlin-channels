@@ -10,12 +10,18 @@ import java.util.*
 
 class RendezvousChannelTest : ChannelTestBase(
     c = RendezvousChannel(),
-    sequentialSpecification = SequentialRendezvousChannel::class.java,
+    sequentialSpecification = SequentialChannel::class.java,
+    obstructionFree = true
+)
+
+class BufferedChannelTest : ChannelTestBase(
+    c = BufferedChannel(10),
+    sequentialSpecification = SequentialChannel::class.java,
     obstructionFree = true
 )
 
 // Sequential specification for a rendezvous channel
-class SequentialRendezvousChannel {
+class SequentialChannel {
     private val senders   = ArrayList<Pair<CancellableContinuation<Unit>, Int>>()
     private val receivers = ArrayList<CancellableContinuation<Int>>()
 
