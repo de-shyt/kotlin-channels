@@ -1,12 +1,13 @@
-package com.deshyt
+package com.deshyt.buffered
 
+import com.deshyt.Channel
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
+class BufferedChannel<E>(private val capacity: Int) : Channel<E> {
     /*
       The counters show the total amount of senders and receivers ever performed.
       The counters are incremented in the beginning of the corresponding operation, thus

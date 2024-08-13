@@ -2,6 +2,8 @@
 
 package com.deshyt
 
+import com.deshyt.buffered.BufferedChannel
+import com.deshyt.rendezvous.RendezvousChannel
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine

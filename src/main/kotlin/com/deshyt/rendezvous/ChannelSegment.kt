@@ -1,4 +1,4 @@
-package com.deshyt
+package com.deshyt.rendezvous
 
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic

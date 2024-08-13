@@ -1,5 +1,6 @@
-package com.deshyt
+package com.deshyt.rendezvous
 
+import com.deshyt.Channel
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellableContinuation
