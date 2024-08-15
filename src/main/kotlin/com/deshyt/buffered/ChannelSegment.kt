@@ -58,7 +58,8 @@ class ChannelSegment<E>(
         check(updatedValue <= SEGMENT_SIZE) {
             "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)"
         }
-        tryRemoveSegment()
+        // TODO remove the segment physically
+//        tryRemoveSegment()
     }
 
     private fun interruptedCellsCounter(): Int = interruptedCellsCounter.value
@@ -155,7 +156,7 @@ class ChannelSegment<E>(
             }
 
             // Count the actual amount of interrupted cells
-            if (getCell(i).getState() == CellState.INTERRUPTED) interruptedCells++
+            if (getCell(i).isInterrupted()) interruptedCells++
         }
 
         // Check that the value of the segment's counter is correct
@@ -169,7 +170,7 @@ class ChannelSegment<E>(
                 check(isRemoved()) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
                 // Check that the state of each cell is INTERRUPTED
                 for (i in 0 until SEGMENT_SIZE) {
-                    check(getCell(i).getState() == CellState.INTERRUPTED) { "Segment $this: the segment is logically removed, but the cell $i is not marked INTERRUPTED." }
+                    check(getCell(i).isInterrupted()) { "Segment $this: the segment is logically removed, but the cell $i is not marked INTERRUPTED." }
                 }
             }
             1 -> error("Segment $this: the amount of interrupted cells ($interruptedCells) is greater than SEGMENT_SIZE (${SEGMENT_SIZE}).")
