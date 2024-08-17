@@ -28,11 +28,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
      */
     private val sendSegment: AtomicRef<ChannelSegment<E>>
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
+    private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
     init {
         val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
+        bufferEndSegment = atomic(firstSegment.findSegment(bufferEnd.value / SEGMENT_SIZE))
     }
 
     override suspend fun send(elem: E) {
@@ -253,10 +255,41 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 return
             }
             // The cell stores a sender or there is an incoming one.
-            val cell = sendSegment.value.findSegment(b / SEGMENT_SIZE)
-                .getCell((b % SEGMENT_SIZE).toInt())
+            val segm = findAndMoveForwardEB(startSegment = bufferEndSegment.value, destSegmentId = b / SEGMENT_SIZE)
+            if (segm.id != b / SEGMENT_SIZE) {
+                bufferEnd.compareAndSet(b + 1, segm.id * SEGMENT_SIZE)
+                continue
+            }
+            val cell = segm.getCell((b % SEGMENT_SIZE).toInt())
             if (updateCellOnExpandBuffer(cell)) {
                 return
+            }
+        }
+    }
+
+    private fun findAndMoveForwardEB(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+        while (true) {
+            val destSegment = startSegment.findSegment(destSegmentId)
+            // Try to update `bufferEndSegment` and restart if the found segment is logically removed
+            if (moveForwardEB(destSegment)) {
+                return destSegment
+            }
+        }
+    }
+
+    private fun moveForwardEB(to: ChannelSegment<E>): Boolean {
+        while (true) {
+            val cur = bufferEndSegment.value
+            if (cur.id >= to.id) {
+                // No need to update the pointer, it was already updated by another request.
+                return true
+            }
+            if (to.isRemoved()) {
+                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardSend].
+                return false
+            }
+            if (bufferEndSegment.compareAndSet(cur, to)) {
+                return true
             }
         }
     }
@@ -358,10 +391,10 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         return cur
     }
 
-    private class Coroutine(
+    class Coroutine(
         val cont: CancellableContinuation<Boolean>,
         val requestType: RequestType
     )
 
-    private enum class RequestType { SEND, RECEIVE }
+    enum class RequestType { SEND, RECEIVE }
 }

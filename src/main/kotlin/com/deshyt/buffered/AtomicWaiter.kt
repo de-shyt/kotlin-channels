@@ -64,11 +64,13 @@ class AtomicWaiter<E>(
     internal fun validate() {
         // Check that the state is of valid type and there are no memory leaks
         when (val state = getState()) {
-            CellState.EMPTY, CellState.DONE, CellState.BROKEN, CellState.INTERRUPTED_SEND, CellState.INTERRUPTED_RCV -> {
+            CellState.EMPTY, CellState.IN_BUFFER, CellState.DONE, CellState.BROKEN,
+            CellState.INTERRUPTED_SEND, CellState.INTERRUPTED_RCV -> {
                 check(getElement() == null) { "The state is ${state}, but the element is not null in $this." }
             }
             CellState.BUFFERED -> {}
-            is CancellableContinuation<*> -> {}
+            is BufferedChannel.Coroutine -> {}
+            CellState.RESUMING_RCV, CellState.RESUMING_EB -> error("The state is $state in $this, but it should have been changed to DONE or INTERRUPTED.")
             else -> error("Unexpected state $state in $this.")
         }
     }
