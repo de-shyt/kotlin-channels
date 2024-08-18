@@ -58,8 +58,7 @@ class ChannelSegment<E>(
         check(updatedValue <= SEGMENT_SIZE) {
             "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)"
         }
-        // TODO remove the segment physically
-//        tryRemoveSegment()
+        tryRemoveSegment()
     }
 
     private fun interruptedCellsCounter(): Int = interruptedCellsCounter.value
@@ -91,24 +90,25 @@ class ChannelSegment<E>(
        the segment physically by updating the neighbours' `prev` and `next` links.
      */
     internal fun tryRemoveSegment() {
-        if (!isRemoved()) {
-            // There are non-interrupted cells, no need to remove the segment.
-            return
-        }
-        if (getNext() == null) {
-            // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
-            return
-        }
-        // Find the closest non-removed segments on the left and on the right
-        val prev = aliveSegmentLeft()
-        val next = aliveSegmentRight()
-
-        // Update the links
-        prev?.casNext(this, next)
-        next.casPrev(this, prev)
-
-        next.tryRemoveSegment()
-        prev?.tryRemoveSegment()
+        // TODO remove segment physically
+//        if (!isRemoved()) {
+//            // There are non-interrupted cells, no need to remove the segment.
+//            return
+//        }
+//        if (getNext() == null) {
+//            // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
+//            return
+//        }
+//        // Find the closest non-removed segments on the left and on the right
+//        val prev = aliveSegmentLeft()
+//        val next = aliveSegmentRight()
+//
+//        // Update the links
+//        prev?.casNext(this, next)
+//        next.casPrev(this, prev)
+//
+//        next.tryRemoveSegment()
+//        prev?.tryRemoveSegment()
     }
 
     /*

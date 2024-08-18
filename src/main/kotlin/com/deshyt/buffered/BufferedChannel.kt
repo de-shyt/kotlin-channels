@@ -78,7 +78,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 // The receiver is in the cell waiting for a rendezvous => try to resume it
                 state is Coroutine -> {
                     if (state.cont.tryResumeRequest(true)) {
-                        cell.casState(state, CellState.DONE)
+                        cell.casState(state, CellState.DONE_RCV)
                         return true
                     } else {
                         cell.casState(state, CellState.BROKEN)
@@ -322,10 +322,11 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                         // A suspended receiver is stored => finish
                         RequestType.RECEIVE -> return true
                     }
-
                 }
                 // The element is already buffered => finish
                 CellState.BUFFERED -> return true
+                // The rendezvous happened => finish, expandBuffer() was invoked before the receiver was suspended
+                CellState.DONE_RCV -> return true
                 // The sender was interrupted => restart
                 CellState.INTERRUPTED_SEND -> return false
                 // The receiver was interrupted => finish

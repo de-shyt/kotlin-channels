@@ -51,7 +51,7 @@ class AtomicWaiter<E>(
        corresponding segment about the cancellation by increasing the segment's counter.
      */
     internal fun onInterrupt(newState: CellState) {
-        require(newState == CellState.INTERRUPTED_SEND || newState == CellState.INTERRUPTED_RCV)
+        require(newState == CellState.INTERRUPTED_SEND || newState == CellState.INTERRUPTED_RCV) { "Trying to assign an illegal state $newState on coroutine's cancellation." }
         setState(newState)
         segment.onCellInterrupt()
         cleanElement()
@@ -64,7 +64,7 @@ class AtomicWaiter<E>(
     internal fun validate() {
         // Check that the state is of valid type and there are no memory leaks
         when (val state = getState()) {
-            CellState.EMPTY, CellState.IN_BUFFER, CellState.DONE, CellState.BROKEN,
+            CellState.EMPTY, CellState.IN_BUFFER, CellState.DONE_RCV, CellState.BROKEN,
             CellState.INTERRUPTED_SEND, CellState.INTERRUPTED_RCV -> {
                 check(getElement() == null) { "The state is ${state}, but the element is not null in $this." }
             }
@@ -77,8 +77,9 @@ class AtomicWaiter<E>(
 }
 
 enum class CellState {
-    EMPTY, DONE, BUFFERED, BROKEN,
+    EMPTY, BUFFERED, BROKEN,
     IN_BUFFER,  /* Indicates that the cell is in the buffer and the sender should not suspend */
+    DONE_RCV, /* The sender resumed the suspended receiver and a rendezvous happened */
     INTERRUPTED_SEND, INTERRUPTED_RCV,  /* Specifies the type of request which coroutine was interrupted */
     RESUMING_RCV, RESUMING_EB  /* Specifies which entity resumes the sender (a coming receiver or `expandBuffer()`) */
 }
