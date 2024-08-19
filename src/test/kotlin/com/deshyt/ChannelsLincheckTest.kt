@@ -36,14 +36,14 @@ class SequentialRendezvousChannel {
     suspend fun send(x: Int) {
         if (resumeFirstReceiver(x)) return
         suspendCancellableCoroutine { cont ->
-            senders.add(Pair(cont, x))
+            senders.add(cont to x)
         }
     }
 
-    private fun resumeFirstReceiver(element: Int): Boolean {
+    private fun resumeFirstReceiver(elem: Int): Boolean {
         while (receivers.isNotEmpty()) {
             val r = receivers.removeFirst()
-            if (r.resume(element)) return true
+            if (r.resume(elem)) return true
         }
         return false
     }
@@ -55,7 +55,7 @@ class SequentialRendezvousChannel {
 
     private fun resumeFirstSender(): Int? {
         while (senders.isNotEmpty()) {
-            val (sender, elem) = senders.removeAt(0)
+            val (sender, elem) = senders.removeFirst()
             if (sender.resume(Unit)) return elem
         }
         return null
@@ -67,24 +67,27 @@ open class SequentialBufferedChannel(
     private val capacity: Long
 ) {
     private val senders = ArrayList<Pair<CancellableContinuation<Unit>, Int>>()
-    private val bufferedSenders = ArrayList<Int>()
+    private val buffer = ArrayList<Int>()
     private val receivers = ArrayList<CancellableContinuation<Int>>()
 
     suspend fun send(x: Int) {
         if (resumeFirstReceiver(x)) return
         if (tryBufferElem(x)) return
-        suspendCancellableCoroutine { cont -> senders.add(Pair(cont, x)) }
+        suspendCancellableCoroutine { cont -> senders.add(cont to x) }
     }
 
-    private fun tryBufferElem(x: Int): Boolean {
-        if (bufferedSenders.size < capacity) bufferedSenders.add(x).also { return true }
+    private fun tryBufferElem(elem: Int): Boolean {
+        if (buffer.size < capacity) {
+            buffer.add(elem)
+            return true
+        }
         return false
     }
 
-    private fun resumeFirstReceiver(element: Int): Boolean {
+    private fun resumeFirstReceiver(elem: Int): Boolean {
         while (receivers.isNotEmpty()) {
             val r = receivers.removeFirst()
-            if (r.resume(element)) return true
+            if (r.resume(elem)) return true
         }
         return false
     }
@@ -96,9 +99,9 @@ open class SequentialBufferedChannel(
     }
 
     private fun getBufferedElem(): Int? {
-        val elem = bufferedSenders.removeFirstOrNull()?.also {
-            // The element is retrieved from the buffer, resume one sender and add its element to the buffer
-            resumeFirstSender()?.also { bufferedSenders.add(it) }
+        val elem = buffer.removeFirstOrNull()?.also {
+            // The element is retrieved from the buffer, resume one sender and save its element in the buffer
+            resumeFirstSender()?.also { buffer.add(it) }
         }
         return elem
     }
