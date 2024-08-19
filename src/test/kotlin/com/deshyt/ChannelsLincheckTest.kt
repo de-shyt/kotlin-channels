@@ -16,9 +16,15 @@ class RendezvousChannelTest : ChannelTestBase(
     obstructionFree = true
 )
 
-class BufferedChannelTest : ChannelTestBase(
+class Buffered2ChannelTest : ChannelTestBase(
     c = BufferedChannel(2),
-    sequentialSpecification = SequentialBufferedChannel::class.java,
+    sequentialSpecification = SequentialBuffered2Channel::class.java,
+    obstructionFree = true
+)
+
+class Buffered1ChannelTest : ChannelTestBase(
+    c = BufferedChannel(1),
+    sequentialSpecification = SequentialBuffered1Channel::class.java,
     obstructionFree = true
 )
 
@@ -56,8 +62,10 @@ class SequentialRendezvousChannel {
     }
 }
 
-class SequentialBufferedChannel {
-    private val capacity = 2L
+// Sequential specification for a buffered channel
+open class SequentialBufferedChannel(
+    private val capacity: Long
+) {
     private val senders = ArrayList<Pair<CancellableContinuation<Unit>, Int>>()
     private val bufferedSenders = ArrayList<Int>()
     private val receivers = ArrayList<CancellableContinuation<Int>>()
@@ -87,7 +95,13 @@ class SequentialBufferedChannel {
             ?: suspendCancellableCoroutine { cont -> receivers.add(cont) }
     }
 
-    private fun getBufferedElem(): Int? = bufferedSenders.removeFirstOrNull()
+    private fun getBufferedElem(): Int? {
+        val elem = bufferedSenders.removeFirstOrNull()?.also {
+            // The element is retrieved from the buffer, resume one sender and add its element to the buffer
+            resumeFirstSender()?.also { bufferedSenders.add(it) }
+        }
+        return elem
+    }
 
     private fun resumeFirstSender(): Int? {
         while (senders.isNotEmpty()) {
@@ -97,6 +111,9 @@ class SequentialBufferedChannel {
         return null
     }
 }
+
+class SequentialBuffered1Channel : SequentialBufferedChannel(1)
+class SequentialBuffered2Channel : SequentialBufferedChannel(2)
 
 @OptIn(InternalCoroutinesApi::class)
 private fun <T> CancellableContinuation<T>.resume(res: T): Boolean {
