@@ -7,9 +7,11 @@ import org.junit.*
 
 
 abstract class TestBase(
-    open val sequentialSpecification: Class<*>,
+//    open val sequentialSpecification: Class<*>,
     val checkObstructionFreedom: Boolean = true
 ) {
+    abstract fun sequentialSpecification(): Class<*>
+
     @Test
     fun modelCheckingTest() = ModelCheckingOptions()
         .iterations(scenarios)
@@ -19,7 +21,7 @@ abstract class TestBase(
         .actorsPerThread(actorsPerThreadAmount)
         .actorsAfter(actorsAfterAmount)
         .checkObstructionFreedom(checkObstructionFreedom)
-        .sequentialSpecification(sequentialSpecification)
+        .sequentialSpecification(sequentialSpecification())
         .check(this::class)
 
     @Test
@@ -30,7 +32,7 @@ abstract class TestBase(
         .actorsBefore(actorsBeforeAmount)
         .actorsPerThread(actorsPerThreadAmount)
         .actorsAfter(actorsAfterAmount)
-        .sequentialSpecification(sequentialSpecification)
+        .sequentialSpecification(sequentialSpecification())
         .check(this::class)
 }
 
