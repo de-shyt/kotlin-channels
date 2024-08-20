@@ -12,27 +12,21 @@ import kotlin.collections.ArrayList
 
 class RendezvousChannelTest : ChannelTestBase(
     c = RendezvousChannel(),
-//    sequentialSpecification = SequentialRendezvousChannel::class.java,
+    sequentialSpecification = SequentialRendezvousChannel::class.java,
     obstructionFree = true
-) {
-    override fun sequentialSpecification() = SequentialRendezvousChannel::class.java
-}
+)
 
 class Buffered2ChannelTest : ChannelTestBase(
     c = BufferedChannel(2),
-//    sequentialSpecification = SequentialBuffered2Channel::class.java,
+    sequentialSpecification = SequentialBuffered2Channel::class.java,
     obstructionFree = true
-) {
-    override fun sequentialSpecification() = SequentialBuffered2Channel::class.java
-}
+)
 
 class Buffered1ChannelTest : ChannelTestBase(
     c = BufferedChannel(1),
-//    sequentialSpecification = SequentialBuffered1Channel::class.java,
+    sequentialSpecification = SequentialBuffered1Channel::class.java,
     obstructionFree = true
-) {
-    override fun sequentialSpecification() = SequentialBuffered1Channel::class.java
-}
+)
 
 // Sequential specification for a rendezvous channel
 class SequentialRendezvousChannel {
