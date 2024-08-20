@@ -8,7 +8,6 @@ import org.junit.*
 
 abstract class TestBase(
     open val sequentialSpecification: Class<*>,
-    val checkObstructionFreedom: Boolean = true
 ) {
     @Test
     fun modelCheckingTest() = ModelCheckingOptions()
@@ -18,7 +17,7 @@ abstract class TestBase(
         .actorsBefore(actorsBeforeAmount)
         .actorsPerThread(actorsPerThreadAmount)
         .actorsAfter(actorsAfterAmount)
-        .checkObstructionFreedom(checkObstructionFreedom)
+        .checkObstructionFreedom()
         .sequentialSpecification(sequentialSpecification)
         .check(this::class)
 

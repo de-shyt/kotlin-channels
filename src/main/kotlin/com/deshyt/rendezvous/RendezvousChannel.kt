@@ -1,5 +1,6 @@
-package com.deshyt
+package com.deshyt.rendezvous
 
+import com.deshyt.Channel
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellableContinuation
@@ -38,31 +39,29 @@ class RendezvousChannel<E> : Channel<E> {
                 sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
-            val cell = segment.getCell(index = (s % SEGMENT_SIZE).toInt())
-            cell.setElement(elem)
-            if (updateCellOnSend(s, cell)) return
-            cell.cleanElement()
+            val index = (s % SEGMENT_SIZE).toInt()
+            segment.setElement(index, elem)
+            if (updateCellOnSend(s, segment, index)) return
+            segment.cleanElement(index)
         }
     }
 
-    private suspend fun updateCellOnSend(s: Long, cell: AtomicWaiter<E>): Boolean {
+    private suspend fun updateCellOnSend(s: Long, segment: ChannelSegment<E>, index: Int): Boolean {
         while (true) {
             if (s < receiversCounter.value) {
-                if (cell.getState() is CancellableContinuation<*>) {
-                    // The receiver is in the cell waiting for a rendezvous
-                    return tryMakeRendezvous(cell)
-                }
-                if (cell.casState(CellState.EMPTY, CellState.BUFFERED)) {
-                    // The receiver came, but its coroutine is not placed in the cell yet. Mark the cell BUFFERED.
-                    return true
-                }
-                if (cell.getState() == CellState.BROKEN || cell.getState() == CellState.INTERRUPTED) {
-                    // The cell was marked BROKEN by the receiver or INTERRUPTED. Restart the sender.
-                    return false
+                when (segment.getState(index)) {
+                    // Receiver covers the cell, but the cell is empty => try to buffer the element
+                    null -> if (segment.casState(index, null, CellState.BUFFERED)) return true
+                    // Suspended receiver in the cell => try to make a rendezvous
+                    is CancellableContinuation<*> -> return tryMakeRendezvous(segment, index)
+                    // The cell was poisoned by a receiver => restart the sender
+                    CellState.POISONED -> return false
+                    // Cancelled receiver in the cell => restart the sender
+                    CellState.INTERRUPTED -> return false
                 }
             } else {
-                // The cell is empty. Try placing the sender's coroutine in the cell.
-                if (trySuspendRequest(cell)) return true
+                // The cell is empty => try to place the sender's coroutine in the cell.
+                if (trySuspendRequest(segment, index)) return true
             }
         }
     }
@@ -77,36 +76,30 @@ class RendezvousChannel<E> : Channel<E> {
                 receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
-            val cell = segment.getCell(index = (r % SEGMENT_SIZE).toInt())
-            if (updateCellOnReceive(r, cell)) {
-                // The element was successfully received. Return the value, then clean the cell to avoid memory leaks
-                return cell.retrieveElement()
+            val index = (r % SEGMENT_SIZE).toInt()
+            if (updateCellOnReceive(r, segment, index)) {
+                // The element was successfully received. Return the value and clean the cell to avoid memory leaks
+                return segment.retrieveElement(index)
             }
         }
     }
 
-    private suspend fun updateCellOnReceive(r: Long, cell: AtomicWaiter<E>): Boolean {
+    private suspend fun updateCellOnReceive(r: Long, segment: ChannelSegment<E>, index: Int): Boolean {
         while (true) {
             if (r < sendersCounter.value) {
-                if (cell.getState() is CancellableContinuation<*>) {
-                    // The sender is in the cell waiting for a rendezvous
-                    return tryMakeRendezvous(cell)
-                }
-                if (cell.casState(CellState.BUFFERED, CellState.DONE)) {
-                    // The element was placed in the cell by the sender
-                    return true
-                }
-                if (cell.casState(CellState.EMPTY, CellState.BROKEN)) {
-                    // The sender came, but the cell is empty.
-                    return false
-                }
-                if (cell.getState() == CellState.INTERRUPTED) {
-                    // The cell was INTERRUPTED. Restart the receiver.
-                    return false
+                when (segment.getState(index)) {
+                    // The sender covers the cell, but the cell is empty => break the cell and restart the receiver
+                    null -> if (segment.casState(index, null, CellState.POISONED)) return false
+                    // Suspended sender is in the cell => try to make a rendezvous
+                    is CancellableContinuation<*> -> return tryMakeRendezvous(segment, index)
+                    // The element was placed in the cell by the sender => return the element
+                    CellState.BUFFERED -> return true
+                    // Cancelled sender in the cell => restart the receiver
+                    CellState.INTERRUPTED -> return false
                 }
             } else {
-                // The cell is empty. Try placing the receiver's coroutine in the cell.
-                if (trySuspendRequest(cell)) return true
+                // The cell is empty => try to place the receiver's coroutine in the cell
+                if (trySuspendRequest(segment, index)) return true
             }
         }
     }
@@ -117,14 +110,14 @@ class RendezvousChannel<E> : Channel<E> {
        marked BROKEN and resources are cleaned.
      */
     @Suppress("UNCHECKED_CAST")
-    private fun tryMakeRendezvous(cell: AtomicWaiter<E>): Boolean {
-        val cont = cell.getState()
+    private fun tryMakeRendezvous(segment: ChannelSegment<E>, index: Int): Boolean {
+        val cont = segment.getState(index)
         if (cont is CancellableContinuation<*>) {
             if ((cont as CancellableContinuation<Boolean>).tryResumeRequest(true)) {
-                cell.casState(cont, CellState.DONE)
+                segment.casState(index, cont, CellState.DONE)
                 return true
             } else {
-                cell.casState(cont, CellState.BROKEN)
+                segment.casState(index, cont, CellState.POISONED)
                 return false
             }
         }
@@ -137,13 +130,13 @@ class RendezvousChannel<E> : Channel<E> {
        resumes the coroutine with the specified boolean value. This value is then returned by
        [trySuspendRequest].
        If there is a failure while trying to place a coroutine in the cell, [trySuspendRequest]
-       attempts to resume the coroutine, then returns false.
+       resumes the coroutine and returns false.
      */
-    private suspend fun trySuspendRequest(cell: AtomicWaiter<E>): Boolean {
+    private suspend fun trySuspendRequest(segment: ChannelSegment<E>, index: Int): Boolean {
         return suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation { cell.onInterrupt() }
+            cont.invokeOnCancellation { segment.onInterrupt(index) }
             // Try to place the coroutine in the cell.
-            if (!cell.casState(CellState.EMPTY, cont)) {
+            if (!segment.casState(index, null, cont)) {
                 // The cell is occupied by the opposite request. Resume the coroutine.
                 cont.tryResumeRequest(false)
             }
@@ -255,7 +248,7 @@ class RendezvousChannel<E> : Channel<E> {
 
             // Check that the removed segments are not reachable from the list.
             // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
-            check(curSegment.isAlive() || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            check(!curSegment.isRemoved() || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
             curSegment.validate()
