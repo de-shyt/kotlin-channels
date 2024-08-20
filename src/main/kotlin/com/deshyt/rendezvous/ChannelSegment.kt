@@ -2,6 +2,8 @@ package com.deshyt.rendezvous
 
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.atomicArrayOfNulls
+import kotlinx.coroutines.CancellableContinuation
 
 /**
  * The channel is represented as a list of segments, which simulates an infinite array.
@@ -10,24 +12,52 @@ import kotlinx.atomicfu.atomic
  * The structure of the segment list is manipulated inside the methods [findSegment]
  * and [tryRemoveSegment] and cannot be changed from the outside.
  */
-class ChannelSegment<E>(
+internal class ChannelSegment<E>(
     val id: Long,
     prevSegment: ChannelSegment<E>?,
 ) {
     private val next: AtomicRef<ChannelSegment<E>?> = atomic(null)
     private val prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment)
 
-    private val cells = List(SEGMENT_SIZE) { AtomicWaiter(this) }
-
     /*
        The counter shows how many cells are marked interrupted in the segment. If the value is
        equal to SEGMENT_SIZE, it means all cells were interrupted and the segment should be removed.
     */
     private val interruptedCellsCounter = atomic(0)
+    private val interruptedCells: Int get() = interruptedCellsCounter.value
+
+    /*
+       Represents an array of slots, the amount of slots is equal to `SEGMENT_SIZE`.
+       Each slot consists of 2 registers: a state and an element.
+    */
+    private val data = atomicArrayOfNulls<Any?>(SEGMENT_SIZE * 2)
+
+    // ######################################
+    // # Manipulation with the State Fields #
+    // ######################################
+
+    internal fun setState(index: Int, value: Any) { data[index * 2 + 1].lazySet(value) }
+
+    internal fun getState(index: Int): Any? = data[index * 2 + 1].value
+
+    internal fun casState(index: Int, from: Any?, to: Any) = data[index * 2 + 1].compareAndSet(from, to)
 
     // ########################################
-    // # Manipulation with the segment's data #
+    // # Manipulation with the Element Fields #
     // ########################################
+
+    internal fun setElement(index: Int, value: E) { data[index * 2].value = value }
+
+    @Suppress("UNCHECKED_CAST")
+    internal fun getElement(index: Int): E? = data[index * 2].value as E?
+
+    internal fun retrieveElement(index: Int): E = getElement(index)!!.also { cleanElement(index) }
+
+    internal fun cleanElement(index: Int) { data[index * 2].lazySet(null) }
+
+    // ###################################################
+    // # Manipulation with the segment's neighbour links #
+    // ###################################################
 
     internal fun getNext(): ChannelSegment<E>? = next.value
 
@@ -37,21 +67,20 @@ class ChannelSegment<E>(
 
     private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
 
-    internal fun getCell(index: Int): AtomicWaiter<E> = cells[index]
+    // ########################
+    // # Cancellation Support #
+    // ########################
 
     /*
-       These methods show the state of the segment. The segment is logically removed if all its
-       cells are were interrupted. [isRemoved] method is used to check this condition.
+       This method is invoked on the cancellation of the coroutine's continuation. When the
+       coroutine is cancelled, the cell's state is marked INTERRUPTED, its element is set to null
+       in order to avoid memory leaks and the segment's counter of interrupted cells is increased.
     */
-    internal fun isRemoved(): Boolean = interruptedCellsCounter() == SEGMENT_SIZE
-    internal fun isAlive(): Boolean = !isRemoved()
-
-    /*
-       This method is used to update `interruptedCellsCounter`. The counter increases when the
-       coroutine stored in one of the segment's cells is cancelled (see [AtomicWaiter#onInterrupt]
-       method).
-    */
-    internal fun onCellInterrupt() = increaseInterruptedCellsCounter()
+    internal fun onInterrupt(index: Int) {
+        setState(index, CellState.INTERRUPTED)
+        cleanElement(index)
+        increaseInterruptedCellsCounter()
+    }
 
     private fun increaseInterruptedCellsCounter() {
         val updatedValue = interruptedCellsCounter.incrementAndGet()
@@ -61,11 +90,15 @@ class ChannelSegment<E>(
         tryRemoveSegment()
     }
 
-    private fun interruptedCellsCounter(): Int = interruptedCellsCounter.value
+    // ###################################################
+    // # Manipulation with the structure of segment list #
+    // ###################################################
 
-    // #######################################################
-    // # Manipulation with the structure of the segment list #
-    // #######################################################
+    /*
+       This method shows whether the segment is logically removed. It returns true if all cells
+       in the segment were interrupted.
+    */
+    internal fun isRemoved(): Boolean = interruptedCells == SEGMENT_SIZE
 
     /*
        This method looks for a segment with id equal to or greater than the requested id.
@@ -134,47 +167,62 @@ class ChannelSegment<E>(
         return cur
     }
 
-    override fun toString(): String = "ChannelSegment(id=$id)"
-
     // #####################################
     // # Validation of the segment's state #
     // #####################################
 
+    override fun toString(): String = "ChannelSegment(id=$id)"
+
     internal fun validate() {
         var interruptedCells = 0
 
-        for (i in 0 until SEGMENT_SIZE) {
-            // Check that the cell is bounded with the right segment
-            check(getCell(i).getSegmentId() == id) { "Segment $this: the cell $i is bounded with the wrong segment." }
-
+        for (index in 0 until SEGMENT_SIZE) {
             // Check that there are no memory leaks
-            try {
-                getCell(i).validate()
-            } catch (e: Exception) {
-                error("Segment $this: ${e.message}")
-            }
-
+            cellValidate(index)
             // Count the actual amount of interrupted cells
-            if (getCell(i).getState() == CellState.INTERRUPTED) interruptedCells++
+            if (getState(index) == CellState.INTERRUPTED) interruptedCells++
         }
 
         // Check that the value of the segment's counter is correct
-        val counter = interruptedCellsCounter()
-        check(interruptedCells == counter) { "Segment $this: the segment's counter ($counter) and the amount of interrupted cells ($interruptedCells) are different." }
+        check(interruptedCells == this.interruptedCells) { "Segment $this: the segment's counter (${this.interruptedCells}) and the amount of interrupted cells ($interruptedCells) are different." }
 
         // Check that the segment's state is correct
         when (interruptedCells.compareTo(SEGMENT_SIZE)) {
-            -1 -> check(isAlive()) { "Segment $this: there are non-interrupted cells, but the segment is logically removed." }
+            -1 -> check(!isRemoved()) { "Segment $this: there are non-interrupted cells, but the segment is logically removed." }
             0 -> {
                 check(isRemoved()) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
                 // Check that the state of each cell is INTERRUPTED
                 for (i in 0 until SEGMENT_SIZE) {
-                    check(getCell(i).getState() == CellState.INTERRUPTED) { "Segment $this: the segment is logically removed, but the cell $i is not marked INTERRUPTED." }
+                    check(getState(i) == CellState.INTERRUPTED) { "Segment $this: the segment is logically removed, but the cell $i is not marked INTERRUPTED." }
                 }
             }
-            1 -> error("Segment $this: the amount of interrupted cells ($interruptedCells) is greater than SEGMENT_SIZE (${SEGMENT_SIZE}).")
+            1 -> error("Segment $this: the amount of interrupted cells ($interruptedCells) is greater than SEGMENT_SIZE ($SEGMENT_SIZE).")
         }
     }
+
+    private fun cellValidate(index: Int) {
+        when(val state = getState(index)) {
+            null, CellState.DONE, CellState.POISONED, CellState.INTERRUPTED -> {
+                check(getElement(index) == null) { "Segment $this: state is ${state}, but the element is not null in cell $index." }
+            }
+            CellState.BUFFERED -> {}
+            is CancellableContinuation<*> -> {}
+            else -> error("Unexpected state $state in $this.")
+        }
+    }
+}
+
+enum class CellState {
+    /* The element was successfully transferred to a receiver. */
+    DONE,
+    /* The cell stores a buffered element. When a sender comes to a cell which is not covered
+       by a receiver yet, it buffers the element and leaves the cell without suspending. */
+    BUFFERED,
+    /* When a receiver comes to the cell that is already covered by a sender, but the cell is
+       still in `EMPTY` state, it breaks the cell by changing its state to `POISONED`. */
+    POISONED,
+    /* A coroutine was cancelled while waiting for the opposite request. */
+    INTERRUPTED
 }
 
 const val SEGMENT_SIZE = 2
