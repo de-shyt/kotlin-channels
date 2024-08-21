@@ -47,48 +47,50 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
-            val cell = segment.getCell(index = (s % SEGMENT_SIZE).toInt())
-            cell.setElement(elem)
-            if (updateCellOnSend(s, cell)) return
-            cell.cleanElement()
+            val index = (s % SEGMENT_SIZE).toInt()
+            segment.setElement(index, elem)
+            if (updateCellOnSend(s, segment, index)) return
+            segment.cleanElement(index)
         }
     }
 
-    private suspend fun updateCellOnSend(s: Long, cell: AtomicWaiter<E>): Boolean {
+    private suspend fun updateCellOnSend(s: Long, segment: ChannelSegment<E>, index: Int): Boolean {
         while (true) {
-            val state = cell.getState()
+            val state = segment.getState(index)
             val b = bufferEnd.value
             val r = receiversCounter.value
             when {
                 // Empty and either the cell is in the buffer or a receiver is coming => buffer
-                state == CellState.EMPTY && (s < r || s < b) || state == CellState.IN_BUFFER -> {
-                    if (cell.casState(state, CellState.BUFFERED)) return true
+                state == null && (s < r || s < b) || state == CellState.IN_BUFFER -> {
+                    if (segment.casState(index, state, CellState.BUFFERED)) return true
                 }
                 // Empty, the cell is not in the buffer and no receiver is coming => suspend
-                state == CellState.EMPTY && s >= b && s >= r -> {
-                    val trySuspendSend = suspendCancellableCoroutine { cont ->
-                        cont.invokeOnCancellation { cell.onInterrupt(newState = CellState.INTERRUPTED_SEND) }
-                        if (!cell.casState(state, Coroutine(cont, RequestType.SEND))) {
-                            // The cell is occupied by the opposite request. Resume the coroutine.
+                state == null && s >= b && s >= r -> {
+                    val isSuspended = suspendCancellableCoroutine { cont ->
+                        cont.invokeOnCancellation {
+                            segment.onInterrupt(index = index, newState = CellState.INTERRUPTED_SEND)
+                        }
+                        if (!segment.casState(index, null, Coroutine(cont, RequestType.SEND))) {
+                            // The cell is occupied by the opposite request, resume the coroutine.
                             cont.tryResumeRequest(false)
                         }
                     }
-                    if (trySuspendSend) return true
+                    if (isSuspended) return true
                 }
-                // The receiver is in the cell waiting for a rendezvous => try to resume it
+                // Suspended receiver in the cell => try to resume it
                 state is Coroutine -> {
                     if (state.cont.tryResumeRequest(true)) {
-                        cell.casState(state, CellState.DONE_RCV)
+                        segment.casState(index, state, CellState.DONE_RCV)
                         return true
                     } else {
-                        cell.casState(state, CellState.BROKEN)
+                        segment.casState(index, state, CellState.POISONED)
                         return false
                     }
                 }
-                // The cell was marked BROKEN or INTERRUPTED by the receiver, restart the sender.
-                state == CellState.BROKEN || state == CellState.INTERRUPTED_RCV -> {
-                    return false
-                }
+                // The cell was poisoned by a receiver => restart the sender
+                state == CellState.POISONED -> return false
+                // Cancelled receiver in the cell => restart the sender
+                state == CellState.INTERRUPTED_RCV -> return false
             }
         }
     }
@@ -103,35 +105,37 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
-            val cell = segment.getCell(index = (r % SEGMENT_SIZE).toInt())
-            if (updateCellOnReceive(r, cell)) {
+            val index = (r % SEGMENT_SIZE).toInt()
+            if (updateCellOnReceive(r, segment, index)) {
                 // The element was successfully received. Return the value, then clean the cell to avoid memory leaks
-                return cell.retrieveElement()
+                return segment.retrieveElement(index)
             }
         }
     }
 
-    private suspend fun updateCellOnReceive(r: Long, cell: AtomicWaiter<E>): Boolean {
+    private suspend fun updateCellOnReceive(r: Long, segment: ChannelSegment<E>, index: Int): Boolean {
         while (true) {
-            val state = cell.getState()
+            val state = segment.getState(index)
             val s = sendersCounter.value
             when {
                 // The cell is empty and no sender is coming => suspend
-                (state == CellState.EMPTY || state == CellState.IN_BUFFER) && r >= s -> {
-                    val trySuspendReceive = suspendCancellableCoroutine { cont ->
-                        cont.invokeOnCancellation { cell.onInterrupt(newState = CellState.INTERRUPTED_RCV) }
-                        if (cell.casState(state, Coroutine(cont, RequestType.RECEIVE))) {
+                (state == null || state == CellState.IN_BUFFER) && r >= s -> {
+                    val isSuspended = suspendCancellableCoroutine { cont ->
+                        cont.invokeOnCancellation {
+                            segment.onInterrupt(index = index, newState = CellState.INTERRUPTED_RCV)
+                        }
+                        if (segment.casState(index, state, Coroutine(cont, RequestType.RECEIVE))) {
                             expandBuffer()
                         } else {
                             // The cell is occupied by the opposite request. Resume the coroutine.
                             cont.tryResumeRequest(false)
                         }
                     }
-                    if (trySuspendReceive) return true
+                    if (isSuspended) return true
                 }
                 // The cell is empty but a sender is coming => poison & restart
-                (state == CellState.EMPTY || state == CellState.IN_BUFFER) && r < s -> {
-                    if (cell.casState(state, CellState.BROKEN)) {
+                (state == null || state == CellState.IN_BUFFER) && r < s -> {
+                    if (segment.casState(index, state, CellState.POISONED)) {
                         expandBuffer()
                         return false
                     }
@@ -145,11 +149,11 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 state == CellState.INTERRUPTED_SEND -> return false
                 // The sender is in the cell waiting for a rendezvous => try to resume it
                 state is Coroutine -> {
-                    if (cell.casState(state, CellState.RESUMING_RCV)) {
+                    if (segment.casState(index, state, CellState.RESUMING_RCV)) {
                         if (state.cont.tryResumeRequest(true)) {
-                            cell.casState(CellState.RESUMING_RCV, CellState.BUFFERED)
+                            segment.casState(index, CellState.RESUMING_RCV, CellState.BUFFERED)
                         } else {
-                            cell.casState(CellState.RESUMING_RCV, CellState.INTERRUPTED_SEND)
+                            segment.casState(index, CellState.RESUMING_RCV, CellState.INTERRUPTED_SEND)
                         }
                     }
                 }
@@ -255,13 +259,12 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 return
             }
             // The cell stores a sender or there is an incoming one.
-            val segm = findAndMoveForwardEB(startSegment = bufferEndSegment.value, destSegmentId = b / SEGMENT_SIZE)
-            if (segm.id != b / SEGMENT_SIZE) {
-                bufferEnd.compareAndSet(b + 1, segm.id * SEGMENT_SIZE)
+            val segment = findAndMoveForwardEB(startSegment = bufferEndSegment.value, destSegmentId = b / SEGMENT_SIZE)
+            if (segment.id != b / SEGMENT_SIZE) {
+                bufferEnd.compareAndSet(b + 1, segment.id * SEGMENT_SIZE)
                 continue
             }
-            val cell = segm.getCell((b % SEGMENT_SIZE).toInt())
-            if (updateCellOnExpandBuffer(cell)) {
+            if (updateCellOnExpandBuffer(segment, (b % SEGMENT_SIZE).toInt())) {
                 return
             }
         }
@@ -297,32 +300,28 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     /*
        This method returns true if [expandBuffer] should finish and false if [expandBuffer] should restart.
      */
-    @Suppress("UNCHECKED_CAST")
-    private fun updateCellOnExpandBuffer(cell: AtomicWaiter<E>): Boolean {
+    private fun updateCellOnExpandBuffer(segment: ChannelSegment<E>, index: Int): Boolean {
         while (true) {
-            when (val state = cell.getState()) {
+            when (val state = segment.getState(index)) {
                 // The cell is empty => mark the cell as "in the buffer" and finish
-                CellState.EMPTY -> {
-                    if (cell.casState(state, CellState.IN_BUFFER)) {
-                        return true
-                    }
-                }
-                is Coroutine -> {
+                null -> if (segment.casState(index, null, CellState.IN_BUFFER)) return true
+                is Coroutine ->
                     when (state.requestType) {
                         // A suspended sender is stored => try to resume it
                         RequestType.SEND -> {
-                            if (state.cont.tryResumeRequest(true)) {
-                                cell.casState(state, CellState.BUFFERED)
-                                return true
-                            } else {
-                                cell.casState(state, CellState.INTERRUPTED_SEND)
-                                return false
+                            if (segment.casState(index, state, CellState.RESUMING_EB)) {
+                                if (state.cont.tryResumeRequest(true)) {
+                                    segment.casState(index, CellState.RESUMING_EB, CellState.BUFFERED)
+                                    return true
+                                } else {
+                                    segment.casState(index, CellState.RESUMING_EB, CellState.INTERRUPTED_SEND)
+                                    return false
+                                }
                             }
                         }
                         // A suspended receiver is stored => finish
                         RequestType.RECEIVE -> return true
                     }
-                }
                 // The element is already buffered => finish
                 CellState.BUFFERED -> return true
                 // The rendezvous happened => finish, expandBuffer() was invoked before the receiver was suspended
@@ -332,7 +331,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 // The receiver was interrupted => finish
                 CellState.INTERRUPTED_RCV -> return true
                 // Poisoned cell => finish, receive() is in charge
-                CellState.BROKEN -> return true
+                CellState.POISONED -> return true
                 // A receiver is resuming the sender => wait
                 CellState.RESUMING_RCV -> continue
             }
@@ -356,7 +355,9 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             // Check that the segment's `prev` link is correct
             if (curSegment != firstSegment) {
                 check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
-                check(curSegment.getPrev()!!.getNext() == curSegment) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
+                check(
+                    curSegment.getPrev()!!.getNext() == curSegment
+                ) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
             }
 
             // TODO Check that the removed segments are not reachable from the list.
@@ -391,11 +392,11 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
         return cur
     }
-
-    class Coroutine(
-        val cont: CancellableContinuation<Boolean>,
-        val requestType: RequestType
-    )
-
-    enum class RequestType { SEND, RECEIVE }
 }
+
+internal class Coroutine(
+    val cont: CancellableContinuation<Boolean>,
+    val requestType: RequestType
+)
+
+internal enum class RequestType { SEND, RECEIVE }
