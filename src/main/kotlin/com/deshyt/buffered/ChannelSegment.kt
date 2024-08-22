@@ -83,6 +83,7 @@ internal class ChannelSegment<E>(
         setState(index, newState)
         cleanElement(index)
         increaseInterruptedCellsCounter()
+        tryRemoveSegment()
     }
 
     private fun increaseInterruptedCellsCounter() {
@@ -90,7 +91,6 @@ internal class ChannelSegment<E>(
         check(updatedValue <= SEGMENT_SIZE) {
             "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)"
         }
-        tryRemoveSegment()
     }
 
     // ###################################################

@@ -284,7 +284,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         while (true) {
             val cur = bufferEndSegment.value
             if (cur.id >= to.id) {
-                // No need to update the pointer, it was already updated by another request.
+                // No need to update the pointer, it was already updated by another `expandBuffer()` invocation.
                 return true
             }
             if (to.isRemoved()) {
