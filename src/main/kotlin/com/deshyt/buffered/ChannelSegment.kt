@@ -78,7 +78,7 @@ internal class ChannelSegment<E>(
        coroutine is cancelled, the cell's state is marked INTERRUPTED, its element is set to null
        in order to avoid memory leaks and the segment's counter of interrupted cells is increased.
     */
-    internal fun onInterrupt(index: Int, newState: CellState) {
+    internal fun onCancellation(index: Int, newState: CellState) {
         require(newState == CellState.INTERRUPTED_SEND || newState == CellState.INTERRUPTED_RCV)
         setState(index, newState)
         cleanElement(index)
@@ -210,8 +210,8 @@ internal class ChannelSegment<E>(
                 check(getElement(index) == null) { "Segment $this: state is $state, but the element is not null in cell $index." }
             }
             null, CellState.BUFFERED -> {}
-            is Coroutine -> {}
-            CellState.RESUMING_RCV, CellState.RESUMING_EB -> error("Segment $this: state is $state, but should be BUFFERED or INTERRUPTED_SEND.")
+            is Coroutine, is CoroutineEB -> {}
+            CellState.RESUMING_BY_RCV, CellState.RESUMING_BY_EB -> error("Segment $this: state is $state, but should be BUFFERED or INTERRUPTED_SEND.")
             else -> error("Unexpected state $state in $this.")
         }
     }
@@ -231,7 +231,7 @@ enum class CellState {
     /* A coroutine was cancelled while waiting for the opposite request. */
     INTERRUPTED_SEND, INTERRUPTED_RCV,
     /* Specifies which entity resumes the sender (a coming receiver or `expandBuffer()`) */
-    RESUMING_RCV, RESUMING_EB
+    RESUMING_BY_RCV, RESUMING_BY_EB
 }
 
 const val SEGMENT_SIZE = 2
