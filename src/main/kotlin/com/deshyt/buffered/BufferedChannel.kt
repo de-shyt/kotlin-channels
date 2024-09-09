@@ -23,6 +23,12 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val bufferEnd = atomic(capacity)
 
     /*
+       This is the counter of completed [expandBuffer] invocations. It is used for maintaining
+       the guarantee that `expandBuffer()` is invoked on every cell.
+     */
+    private val completedExpandBuffers = atomic(0L)
+
+    /*
        The channel pointers indicate segments where values of `sendersCounter` and
        `receiversCounter` are currently located.
      */
@@ -76,10 +82,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 else -> {
                     val receiver = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
                     if (receiver.tryResumeRequest(true)) {
-                        segment.casState(index, state, CellState.DONE_RCV)
+                        segment.setState(index, CellState.DONE_RCV)
                         return true
                     } else {
-                        // Receiver was cancelled
+                        // The resumption has failed, since the receiver was cancelled.
+                        // Wait until `expandBuffer()`-s invoked on the cells before the current one finish.
+                        waitExpandBufferCompletion(segment.id * SEGMENT_SIZE + index)
+                        segment.setState(index, CellState.INTERRUPTED_RCV)
                         return false
                     }
                 }
@@ -289,18 +298,36 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         while (true) {
             val startSegment = bufferEndSegment.value
             val b = bufferEnd.getAndIncrement()
-            if (b >= sendersCounter.value) {
-                // The cell is not covered by send() request, finish
+            val s = sendersCounter.value
+            if (s <= b) {
+                // The cell is not covered by send() request.
+                // Increase the number of completed `expandBuffer()`-s and finish.
+                incCompletedExpandBufferAttempts()
                 return
             }
-            // The cell stores a sender or there is an incoming one.
             val segment = findAndMoveForwardEB(startSegment = startSegment, destSegmentId = b / SEGMENT_SIZE)
             if (segment.id != b / SEGMENT_SIZE) {
-                bufferEnd.compareAndSet(b + 1, segment.id * SEGMENT_SIZE)
+                // The required segment has been removed; `segment` is the first segment with `id` not lower
+                // than the required one. Try to skip the sequence of removed cells by increasing the `bufferEnd`
+                // counter and updating the number of completed `expandBuffer()`-s.
+                if (bufferEnd.compareAndSet(b + 1, segment.id * SEGMENT_SIZE)) {
+                    incCompletedExpandBufferAttempts(segment.id * SEGMENT_SIZE - b)
+                } else {
+                    incCompletedExpandBufferAttempts()
+                }
+                // As the required segment is already removed, restart `expandBuffer()`.
                 continue
             }
             if (updateCellOnExpandBuffer(segment, (b % SEGMENT_SIZE).toInt(), b)) {
+                // The cell has been added to the logical buffer!
+                // Increment the number of completed `expandBuffer()`-s and finish.
+                incCompletedExpandBufferAttempts()
                 return
+            } else {
+                // The cell has not been added to the buffer.
+                // Increment the number of completed `expandBuffer()`-s and restart.
+                incCompletedExpandBufferAttempts()
+                continue
             }
         }
     }
@@ -371,6 +398,22 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 CellState.RESUMING_BY_RCV -> continue
             }
         }
+    }
+
+    private fun incCompletedExpandBufferAttempts(nAttempts: Long = 1) {
+        completedExpandBuffers.addAndGet(nAttempts)
+    }
+
+    private fun waitExpandBufferCompletion(globalIndex: Long) {
+        // Wait in an infinite loop until the number of started buffer expansion calls
+        // become not lower than the cell index.
+        @Suppress("ControlFlowWithEmptyBody")
+        while (bufferEnd.value <= globalIndex) {}
+        // Now it is guaranteed that the `expandBuffer()` call that should process the
+        // required cell has been started. Wait in an infinite loop until the number of
+        // completed buffer expansion calls become not lower than the cell index.
+        @Suppress("ControlFlowWithEmptyBody")
+        while (completedExpandBuffers.value <= globalIndex) {}
     }
 
     // ###################################
