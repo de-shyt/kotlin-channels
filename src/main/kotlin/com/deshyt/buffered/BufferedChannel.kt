@@ -3,6 +3,7 @@ package com.deshyt.buffered
 import com.deshyt.Channel
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.loop
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -38,23 +39,43 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     override suspend fun send(elem: E) {
+        // Read the segment reference before the counter increment;
+        // it is crucial to be able to find the required segment later.
+        var segment = sendSegment.value
         while (true) {
-            val startSegment = sendSegment.value
+            // Obtain the global index for this sender right before
+            // incrementing the `senders` counter.
             val s = sendersCounter.getAndIncrement()
-            val segment = findAndMoveForwardSend(startSegment = startSegment, destSegmentId = s / SEGMENT_SIZE)
-            if (segment.id != s / SEGMENT_SIZE) {
-                // The `sendSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
-                continue
-            }
+            // Count the required segment id and the cell index in it.
+            val id = s / SEGMENT_SIZE
             val index = (s % SEGMENT_SIZE).toInt()
+            // Try to find the required segment if the initially obtained
+            // one (in the beginning of this function) has lower id.
+            if (segment.id != id) {
+                // Find the required segment.
+                segment = findSegmentSend(id, segment) ?:
+                        // The required segment has not been found, since it was full of
+                        // cancelled cells and, therefore, physically removed.
+                        // Restart the sender.
+                        continue
+            }
+            // Place the element in the cell.
             segment.setElement(index, elem)
+            // Update the cell according to the algorithm. If the cell was
+            // poisoned or stores an interrupted receiver, clean the cell
+            // and restart the sender.
             if (updateCellOnSend(s, segment, index)) return
             segment.cleanElement(index)
         }
     }
 
-    private suspend fun updateCellOnSend(s: Long, segment: ChannelSegment<E>, index: Int): Boolean {
+    private suspend fun updateCellOnSend(
+        /* The global index of the cell. */
+        s: Long,
+        /* The working cell is specified by the segment and the index in it. */
+        segment: ChannelSegment<E>,
+        index: Int
+    ): Boolean {
         while (true) {
             val state = segment.getState(index)
             val b = bufferEnd.value
@@ -88,24 +109,42 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     override suspend fun receive(): E {
+        // Read the segment reference before the counter increment;
+        // it is crucial to be able to find the required segment later.
+        var segment = receiveSegment.value
         while (true) {
-            val startSegment = receiveSegment.value
+            // Obtain the global index for this receiver right before
+            // incrementing the `receivers` counter.
             val r = receiversCounter.getAndIncrement()
-            val segment = findAndMoveForwardReceive(startSegment = startSegment, destSegmentId = r / SEGMENT_SIZE)
-            if (segment.id != r / SEGMENT_SIZE) {
-                // The `receiveSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
-                continue
-            }
+            // Count the required segment id and the cell index in it.
+            val id = r / SEGMENT_SIZE
             val index = (r % SEGMENT_SIZE).toInt()
+            // Try to find the required segment if the initially obtained
+            // one (in the beginning of this function) has lower id.
+            if (segment.id != id) {
+                // Find the required segment.
+                segment = findSegmentReceive(id, segment) ?:
+                    // The required segment has not been found, since it was full of
+                    // cancelled cells and, therefore, physically removed.
+                    // Restart the receiver.
+                    continue
+            }
+            // Update the cell according to the algorithm. If the rendezvous happened,
+            // the received value is returned, then the cell is cleaned to avoid memory
+            // leaks. Otherwise, the receiver restarts.
             if (updateCellOnReceive(r, segment, index)) {
-                // The element was successfully received. Return the value, then clean the cell to avoid memory leaks
                 return segment.retrieveElement(index)
             }
         }
     }
 
-    private suspend fun updateCellOnReceive(r: Long, segment: ChannelSegment<E>, index: Int): Boolean {
+    private suspend fun updateCellOnReceive(
+        /* The global index of the cell. */
+        r: Long,
+        /* The working cell is specified by the segment and the index in it. */
+        segment: ChannelSegment<E>,
+        index: Int
+    ): Boolean {
         while (true) {
             val state = segment.getState(index)
             val s = sendersCounter.value
@@ -213,27 +252,75 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
+    private fun findSegmentSend(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
+        val segment = findAndMoveForwardSend(requiredId, startFrom)
+        return if (segment.id > requiredId) {
+            // The required segment has been removed; `segment` is the first
+            // segment with `id` not lower than the required one.
+            // Skip the sequence of interrupted cells by updating [sendersCounter].
+            updateSendersCounterIfLower(segment.id * SEGMENT_SIZE)
+            null
+        } else {
+            // The required segment has been found, return it.
+            segment
+        }
+    }
+
+    private fun findSegmentReceive(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
+        val segment = findAndMoveForwardReceive(requiredId, startFrom)
+        return if (segment.id > requiredId) {
+            // The required segment has been removed; `segment` is the first
+            // segment with `id` not lower than the required one.
+            // Skip the sequence of interrupted cells by updating [receiversCounter].
+            updateReceiversCounterIfLower(segment.id * SEGMENT_SIZE)
+            null
+        } else {
+            // The required segment has been found, return it.
+            segment
+        }
+    }
+
+    /*
+       Updates the `senders` counter if its value is lower that the specified one.
+       Senders use this method to efficiently skip a sequence of cancelled receivers.
+     */
+    private fun updateSendersCounterIfLower(value: Long): Unit =
+        sendersCounter.loop { curCounter ->
+            if (curCounter >= value) return
+            if (sendersCounter.compareAndSet(curCounter, value)) return
+        }
+
+    /*
+       Updates the `receivers` counter if its value is lower that the specified one.
+       Receivers use this method to efficiently skip a sequence of cancelled senders.
+     */
+    private fun updateReceiversCounterIfLower(value: Long): Unit =
+        receiversCounter.loop { curCounter ->
+            if (curCounter >= value) return
+            if (receiversCounter.compareAndSet(curCounter, value)) return
+        }
+
     /*
        These methods return the first segment which contains non-interrupted cells and which
-       id >= the requested `destSegmentId`. Depending on the request type, either `sendSegment` or
+       id >= the required id. Depending on the request type, either `sendSegment` or
        `receiveSegment` pointer is updated.
      */
-    private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+    private fun findAndMoveForwardSend(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E> {
         while (true) {
-            val destSegment = startSegment.findSegment(destSegmentId)
+            val segment = startFrom.findSegment(requiredId)
             // Try to update `sendSegment` and restart if the found segment is logically removed
-            if (moveForwardSend(destSegment)) {
-                return destSegment
+            if (moveForwardSend(segment)) {
+                return segment
             }
         }
     }
 
-    private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+    private fun findAndMoveForwardReceive(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E> {
         while (true) {
-            val destSegment = startSegment.findSegment(destSegmentId)
+            val segment = startFrom.findSegment(requiredId)
             // Try to update `sendSegment` and restart if the found segment is logically removed
-            if (moveForwardReceive(destSegment)) {
-                return destSegment
+            if (moveForwardReceive(segment)) {
+                return segment
             }
         }
     }
@@ -286,31 +373,73 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
        element, or storing its coroutine for suspension.
      */
     private fun expandBuffer() {
-        while (true) {
-            val startSegment = bufferEndSegment.value
+        // Read the current segment of
+        // the `expandBuffer()` procedure.
+        var segment = bufferEndSegment.value
+        // Try to expand the buffer until succeed.
+        try_again@ while (true) {
+            // Increment the logical end of the buffer.
+            // The `b`-th cell is going to be added to the buffer.
             val b = bufferEnd.getAndIncrement()
+            val id = b / SEGMENT_SIZE
+            // After that, read the current `senders` counter.
+            // In case its value is lower than `b`, the `send(e)`
+            // invocation that will work with this `b`-th cell
+            // will detect that the cell is already a part of the
+            // buffer when comparing with the `bufferEnd` counter.
             if (b >= sendersCounter.value) {
-                // The cell is not covered by send() request, finish
+                // The cell is not covered by send() request. Increment the number
+                // of completed `expandBuffer()`-s and finish.
+                incCompletedExpandBufferAttempts()
                 return
             }
-            // The cell stores a sender or there is an incoming one.
-            val segment = findAndMoveForwardEB(startSegment = startSegment, destSegmentId = b / SEGMENT_SIZE)
-            if (segment.id != b / SEGMENT_SIZE) {
-                bufferEnd.compareAndSet(b + 1, segment.id * SEGMENT_SIZE)
-                continue
+            if (segment.id != id) {
+                segment = findSegmentBufferEnd(id, segment, b) ?:
+                    // The required segment has been removed, restart `expandBuffer()`.
+                    continue@try_again
             }
-            if (updateCellOnExpandBuffer(segment, (b % SEGMENT_SIZE).toInt(), b)) {
+            // Try to add the cell to the logical buffer, updating the cell
+            // state according to the algorithm.
+            val index = (b % SEGMENT_SIZE).toInt()
+            if (updateCellOnExpandBuffer(segment, index, b)) {
+                // The cell has been added to the logical buffer.
+                // Increment the number of completed `expandBuffer()`-s and finish.
+                incCompletedExpandBufferAttempts()
                 return
+            } else {
+                // The cell has not been added to the buffer. Increment the number of
+                // completed `expandBuffer()` attempts and restart.
+                incCompletedExpandBufferAttempts()
+                continue@try_again
             }
         }
     }
 
-    private fun findAndMoveForwardEB(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
+    private fun findSegmentBufferEnd(id: Long, startFrom: ChannelSegment<E>, currentBufferEndCounter: Long)
+    : ChannelSegment<E>? {
+        val segment = findAndMoveForwardEB(startFrom, id)
+        return if (segment.id > id) {
+            // The required segment has been removed; `segment` is the first
+            // segment with `id` not lower than the required one.
+            // Skip the sequence of interrupted cells by updating [bufferEnd] counter.
+            if (bufferEnd.compareAndSet(currentBufferEndCounter + 1, segment.id * SEGMENT_SIZE)) {
+                incCompletedExpandBufferAttempts(segment.id * SEGMENT_SIZE - currentBufferEndCounter)
+            } else {
+                incCompletedExpandBufferAttempts()
+            }
+            null
+        } else {
+            // The required segment has been found, return it.
+            segment
+        }
+    }
+
+    private fun findAndMoveForwardEB(startFrom: ChannelSegment<E>, requiredId: Long): ChannelSegment<E> {
         while (true) {
-            val destSegment = startSegment.findSegment(destSegmentId)
+            val segment = startFrom.findSegment(requiredId)
             // Try to update `bufferEndSegment` and restart if the found segment is logically removed
-            if (moveForwardEB(destSegment)) {
-                return destSegment
+            if (moveForwardEB(segment)) {
+                return segment
             }
         }
     }
@@ -371,6 +500,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 CellState.RESUMING_BY_RCV -> continue
             }
         }
+    }
+
+    /*
+       Increases the amount of completed `expandBuffer` invocations.
+     */
+    private fun incCompletedExpandBufferAttempts(nAttempts: Long = 1) {
+//        completedExpandBuffers.addAndGet(nAttempts)
     }
 
     // ###################################

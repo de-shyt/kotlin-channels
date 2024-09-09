@@ -121,6 +121,19 @@ internal class ChannelSegment<E>(
     }
 
     /*
+       This method looks for a segment with id equal to the requested id or returns the last
+       existing segment, if the required segment is not yet created. Unlike [findSegment],
+       this method does not allocate new segments.
+     */
+    internal fun findSpecifiedOrLast(destSegmentId: Long): ChannelSegment<E> {
+        var curSegment = this
+        while (curSegment.id < destSegmentId) {
+            curSegment = curSegment.next.value ?: break
+        }
+        return curSegment
+    }
+
+    /*
        This method is responsible for removing the segment from the segment list. First, it
        checks if all cells in the segment were interrupted. Then, in case it is true, it removes
        the segment physically by updating the neighbours' `prev` and `next` links.
