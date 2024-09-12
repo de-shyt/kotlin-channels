@@ -46,8 +46,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
 
     override suspend fun send(elem: E) {
         while (true) {
-            val s = sendersCounter.getAndIncrement()
             val startSegment = sendSegment.value
+            val s = sendersCounter.getAndIncrement()
             val segment = findAndMoveForwardSend(startSegment = startSegment, destSegmentId = s / SEGMENT_SIZE)
             if (segment.id != s / SEGMENT_SIZE) {
                 // The `sendSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
@@ -99,8 +99,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
 
     override suspend fun receive(): E {
         while (true) {
-            val r = receiversCounter.getAndIncrement()
             val startSegment = receiveSegment.value
+            val r = receiversCounter.getAndIncrement()
             val segment = findAndMoveForwardReceive(startSegment = startSegment, destSegmentId = r / SEGMENT_SIZE)
             if (segment.id != r / SEGMENT_SIZE) {
                 // The `receiveSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
@@ -297,8 +297,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
      */
     private fun expandBuffer() {
         while (true) {
-            val b = bufferEnd.getAndIncrement()
             val startSegment = bufferEndSegment.value
+            val b = bufferEnd.getAndIncrement()
             val s = sendersCounter.value
             if (s <= b) {
                 // The cell is not covered by send() request.
@@ -420,8 +420,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         // required cell has been started. Wait in an infinite loop until the numbers of
         // started and completed buffer expansion calls coincide.
 
-//        @Suppress("ControlFlowWithEmptyBody")
-//        while (completedExpandBuffers.value <= globalIndex) {}
+        @Suppress("ControlFlowWithEmptyBody")
+        while (completedExpandBuffers.value <= globalIndex) {}
 
 //        repeat(EXPAND_BUFFER_COMPLETION_WAIT_ITERATIONS) {
 //            // Read the number of started buffer expansion calls.
@@ -431,13 +431,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
 //            if (b == ebCompleted && b == bufferEnd.value) return
 //        }
 
-        while (true) {
-            // Read the number of started buffer expansion calls.
-            val b = bufferEnd.value
-            // Read the number of completed buffer expansion calls.
-            val ebCompleted = completedExpandBuffers.value
-            if (b == ebCompleted && b == bufferEnd.value) return
-        }
+//        while (true) {
+//            // Read the number of started buffer expansion calls.
+//            val b = bufferEnd.value
+//            // Read the number of completed buffer expansion calls.
+//            val ebCompleted = completedExpandBuffers.value
+//            if (b == ebCompleted && b == bufferEnd.value) return
+//        }
     }
 
     // ###################################
