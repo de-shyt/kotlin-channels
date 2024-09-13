@@ -133,7 +133,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 }
                 // Buffered element => finish
                 state == CellState.BUFFERED -> {
-                    expandBuffer()
+                    segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
                     return true
                 }
                 // Cancelled sender => restart
@@ -299,6 +299,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         while (true) {
             val startSegment = bufferEndSegment.value
             val b = bufferEnd.getAndIncrement()
+            val id = b / SEGMENT_SIZE
+            val index = (b % SEGMENT_SIZE).toInt()
             val s = sendersCounter.value
             if (s <= b) {
                 // The cell is not covered by send() request.
@@ -306,8 +308,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 incCompletedExpandBufferAttempts()
                 return
             }
-            val segment = findAndMoveForwardEB(startSegment = startSegment, destSegmentId = b / SEGMENT_SIZE)
-            if (segment.id != b / SEGMENT_SIZE) {
+            val segment = findAndMoveForwardEB(startSegment = startSegment, destSegmentId = id)
+            if (segment.id != id) {
                 // The required segment has been removed; `segment` is the first segment with `id` not lower
                 // than the required one. Try to skip the sequence of removed cells by increasing the `bufferEnd`
                 // counter and updating the number of completed `expandBuffer()`-s.
@@ -319,7 +321,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 // As the required segment has been removed, restart `expandBuffer()`.
                 continue
             }
-            if (updateCellOnExpandBuffer(segment, (b % SEGMENT_SIZE).toInt(), b)) {
+            if (updateCellOnExpandBuffer(segment, index, b)) {
                 // The cell has been added to the logical buffer!
                 // Increment the number of completed `expandBuffer()`-s and finish.
                 incCompletedExpandBufferAttempts()
