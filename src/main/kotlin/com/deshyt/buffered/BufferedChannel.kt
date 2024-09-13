@@ -24,6 +24,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val bufferEnd = atomic(capacity)
 
     /*
+       This is the counter of completed [expandBuffer] invocations. It is used for maintaining
+       the guarantee that `expandBuffer()` is invoked on every cell.
+       Initially, its value is equal to the buffer capacity.
+     */
+    private val completedExpandBuffers = atomic(capacity)
+
+    /*
        The channel pointers indicate segments where values of `sendersCounter` and
        `receiversCounter` are currently located.
      */
@@ -32,7 +39,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null)
+        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null, channel = this)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
         bufferEndSegment = atomic(firstSegment.findSegment(bufferEnd.value / SEGMENT_SIZE))
@@ -97,10 +104,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 else -> {
                     val receiver = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
                     if (receiver.tryResumeRequest(true)) {
-                        segment.casState(index, state, CellState.DONE_RCV)
+                        segment.setState(index, CellState.DONE_RCV)
                         return true
                     } else {
-                        // Receiver was cancelled
+                        // The resumption has failed, since the receiver was cancelled.
+                        // Clean the cell and wait until `expandBuffer()`-s invoked on the cells
+                        // before the current one finish.
+                        segment.onCancellation(index = index, isSender = false)
                         return false
                     }
                 }
@@ -162,7 +172,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 }
                 // Buffered element => finish
                 state == CellState.BUFFERED -> {
-                    expandBuffer()
+                    segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
                     return true
                 }
                 // Cancelled sender => restart
@@ -190,7 +200,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                             // The resumption has failed. Update the cell state and restart the receiver.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // skip this cell, so `expandBuffer()` should be called once again.
-                            segment.setState(index, CellState.INTERRUPTED_SEND)
+                            segment.onCancellation(index = index, isSender = true)
                             if (helpExpandBuffer) expandBuffer()
                             return false
                         }
@@ -208,7 +218,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private suspend fun trySuspendSender(segment: ChannelSegment<E>, index: Int): Boolean {
         return suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation {
-                segment.onCancellation(index = index, newState = CellState.INTERRUPTED_SEND)
+                segment.onCancellation(index = index, isSender = true)
             }
             if (!segment.casState(index, null, Coroutine(cont))) {
                 // The cell is occupied by the opposite request. Resume the coroutine.
@@ -225,7 +235,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private suspend fun trySuspendReceiver(segment: ChannelSegment<E>, index: Int): Boolean {
         return suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation {
-                segment.onCancellation(index = index, newState = CellState.INTERRUPTED_RCV)
+                segment.onCancellation(index = index, isSender = false)
             }
             if (segment.casState(index, null, Coroutine(cont))) {
                 expandBuffer()
@@ -377,7 +387,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         // the `expandBuffer()` procedure.
         var segment = bufferEndSegment.value
         // Try to expand the buffer until succeed.
-        try_again@ while (true) {
+        while (true) {
             // Increment the logical end of the buffer.
             // The `b`-th cell is going to be added to the buffer.
             val b = bufferEnd.getAndIncrement()
@@ -396,7 +406,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             if (segment.id != id) {
                 segment = findSegmentBufferEnd(id, segment, b) ?:
                     // The required segment has been removed, restart `expandBuffer()`.
-                    continue@try_again
+                    continue
             }
             // Try to add the cell to the logical buffer, updating the cell
             // state according to the algorithm.
@@ -410,7 +420,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 // The cell has not been added to the buffer. Increment the number of
                 // completed `expandBuffer()` attempts and restart.
                 incCompletedExpandBufferAttempts()
-                continue@try_again
+                continue
             }
         }
     }
@@ -478,7 +488,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                                 segment.setState(index, CellState.BUFFERED)
                                 return true
                             } else {
-                                segment.setState(index, CellState.INTERRUPTED_SEND)
+                                segment.onCancellation(index = index, isSender = true)
                                 return false
                             }
                         }
@@ -507,6 +517,41 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
      */
     private fun incCompletedExpandBufferAttempts(nAttempts: Long = 1) {
 //        completedExpandBuffers.addAndGet(nAttempts)
+    }
+
+    /*
+       Waits in a spin-loop until the [expandBuffer] call that should process the [globalIndex]-th
+       cell is completed. Essentially, it waits until the numbers of started ([bufferEnd]) and
+       completed ([completedExpandBuffers]) [expandBuffer] attempts coincide and become equal or
+       greater than [globalIndex].
+     */
+    internal fun waitExpandBufferCompletion(globalIndex: Long) {
+        // Wait in an infinite loop until the number of started buffer expansion calls
+        // become not lower than the cell index.
+        @Suppress("ControlFlowWithEmptyBody")
+        while (bufferEnd.value <= globalIndex) {}
+        // Now it is guaranteed that the `expandBuffer()` call that should process the
+        // required cell has been started. Wait in an infinite loop until the numbers of
+        // started and completed buffer expansion calls coincide.
+
+        @Suppress("ControlFlowWithEmptyBody")
+        while (completedExpandBuffers.value <= globalIndex) {}
+
+//        repeat(EXPAND_BUFFER_COMPLETION_WAIT_ITERATIONS) {
+//            // Read the number of started buffer expansion calls.
+//            val b = bufferEnd.value
+//            // Read the number of completed buffer expansion calls.
+//            val ebCompleted = completedExpandBuffers.value
+//            if (b == ebCompleted && b == bufferEnd.value) return
+//        }
+
+//        while (true) {
+//            // Read the number of started buffer expansion calls.
+//            val b = bufferEnd.value
+//            // Read the number of completed buffer expansion calls.
+//            val ebCompleted = completedExpandBuffers.value
+//            if (b == ebCompleted && b == bufferEnd.value) return
+//        }
     }
 
     // ###################################

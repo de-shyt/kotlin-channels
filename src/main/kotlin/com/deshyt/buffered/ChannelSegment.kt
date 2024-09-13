@@ -12,6 +12,7 @@ import kotlinx.atomicfu.atomicArrayOfNulls
  * and [tryRemoveSegment] and cannot be changed from the outside.
  */
 internal class ChannelSegment<E>(
+    private val channel: BufferedChannel<E>,
     val id: Long,
     prevSegment: ChannelSegment<E>?,
 ) {
@@ -35,9 +36,11 @@ internal class ChannelSegment<E>(
     // # Manipulation with the State Fields #
     // ######################################
 
+    internal fun getState(index: Int): Any? = data[index * 2 + 1].value
+
     internal fun setState(index: Int, value: Any) { data[index * 2 + 1].lazySet(value) }
 
-    internal fun getState(index: Int): Any? = data[index * 2 + 1].value
+    internal fun getAndSetState(index: Int, value: Any) = data[index * 2 + 1].getAndSet(value)
 
     internal fun casState(index: Int, from: Any?, to: Any) = data[index * 2 + 1].compareAndSet(from, to)
 
@@ -78,18 +81,29 @@ internal class ChannelSegment<E>(
        coroutine is cancelled, the cell's state is marked INTERRUPTED, its element is set to null
        in order to avoid memory leaks and the segment's counter of interrupted cells is increased.
     */
-    internal fun onCancellation(index: Int, newState: CellState) {
-        require(newState == CellState.INTERRUPTED_SEND || newState == CellState.INTERRUPTED_RCV)
-        setState(index, newState)
-        cleanElement(index)
-        increaseInterruptedCellsCounter()
-        tryRemoveSegment()
+    internal fun onCancellation(index: Int, isSender: Boolean) {
+        val stateOnCancellation = if (isSender) CellState.INTERRUPTED_SEND else CellState.INTERRUPTED_RCV
+        if (getAndSetState(index, stateOnCancellation) != stateOnCancellation) {
+            // The cell is marked interrupted. Clean the cell to avoid memory leaks.
+            cleanElement(index)
+            // If the cancelled request is a receiver, wait until `expandBuffer()`-s
+            // invoked on the cells before the current one finish.
+            if (!isSender) channel.waitExpandBufferCompletion(id * SEGMENT_SIZE + index)
+            // Increase the number of interrupted cells and remove the segment physically
+            // in case it becomes logically removed.
+            increaseInterruptedCellsCounter()
+            tryRemoveSegment()
+        } else {
+            // The cell's state has already been set to INTERRUPTED, no further actions
+            // are needed. Finish the [onCancellation] invocation.
+            return
+        }
     }
 
     private fun increaseInterruptedCellsCounter() {
         val updatedValue = interruptedCellsCounter.incrementAndGet()
         check(updatedValue <= SEGMENT_SIZE) {
-            "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)"
+            "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)."
         }
     }
 
@@ -110,7 +124,7 @@ internal class ChannelSegment<E>(
     internal fun findSegment(destSegmentId: Long): ChannelSegment<E> {
         var curSegment = this
         while (curSegment.isRemoved() || curSegment.id < destSegmentId) {
-            val nextSegment = ChannelSegment(id = curSegment.id + 1, prevSegment = curSegment)
+            val nextSegment = ChannelSegment(id = curSegment.id + 1, prevSegment = curSegment, channel = channel)
             if (curSegment.casNext(null, nextSegment)) {
                 // The tail was updated. Check if the old tail should be removed.
                 curSegment.tryRemoveSegment()
