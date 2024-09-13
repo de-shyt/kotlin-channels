@@ -9,7 +9,7 @@ import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 class BufferedChannel<E>(capacity: Long) : Channel<E> {
-    /*
+    /**
       The counters show the total amount of senders and receivers ever performed. They are
       incremented in the beginning of the corresponding operation, thus acquiring a unique
       (for the operation type) cell to process.
@@ -17,29 +17,29 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val sendersCounter = atomic(0L)
     private val receiversCounter = atomic(0L)
 
-    /*
+    /**
        This counter indicates the end of the channel buffer. Its value increases every time
        when a `receive` request is completed.
      */
     private val bufferEnd = atomic(capacity)
 
-    /*
+    /**
        This is the counter of completed [expandBuffer] invocations. It is used for maintaining
-       the guarantee that `expandBuffer()` is invoked on every cell.
+       the guarantee that [expandBuffer] is invoked on every cell.
        Initially, its value is equal to the buffer capacity.
      */
     private val completedExpandBuffers = atomic(capacity)
 
-    /*
-       The channel pointers indicate segments where values of `sendersCounter` and
-       `receiversCounter` are currently located.
+    /**
+       These channel pointers indicate segments where values of [sendersCounter] and
+       [receiversCounter] are currently located.
      */
     private val sendSegment: AtomicRef<ChannelSegment<E>>
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
     private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
     init {
-        val firstSegment = ChannelSegment<E>(id = 0, prevSegment = null, channel = this)
+        val firstSegment = ChannelSegment(id = 0, prevSegment = null, channel = this)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
         bufferEndSegment = atomic(firstSegment.findSegment(bufferEnd.value / SEGMENT_SIZE))
@@ -61,16 +61,14 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             if (segment.id != id) {
                 // Find the required segment.
                 segment = findSegmentSend(id, segment) ?:
-                        // The required segment has not been found, since it was full of
-                        // cancelled cells and, therefore, physically removed.
-                        // Restart the sender.
-                        continue
+                    // The required segment has not been found, since it was full of cancelled
+                    // cells and, therefore, physically removed. Restart the sender.
+                    continue
             }
             // Place the element in the cell.
             segment.setElement(index, elem)
-            // Update the cell according to the algorithm. If the cell was
-            // poisoned or stores an interrupted receiver, clean the cell
-            // and restart the sender.
+            // Update the cell according to the algorithm. If the cell was poisoned or
+            // stores an interrupted receiver, clean the cell and restart the sender.
             if (updateCellOnSend(s, segment, index)) return
             segment.cleanElement(index)
         }
@@ -134,9 +132,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             if (segment.id != id) {
                 // Find the required segment.
                 segment = findSegmentReceive(id, segment) ?:
-                    // The required segment has not been found, since it was full of
-                    // cancelled cells and, therefore, physically removed.
-                    // Restart the receiver.
+                    // The required segment has not been found, since it was full of cancelled
+                    // cells and, therefore, physically removed. Restart the receiver.
                     continue
             }
             // Update the cell according to the algorithm. If the rendezvous happened,
@@ -193,8 +190,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                             // The sender was resumed successfully. Update the cell state, expand the buffer and finish.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // finish, as the sender is resumed. Thus, no further action is required.
-                            segment.setState(index, CellState.DONE_RCV)
-                            expandBuffer()
+                            segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
                             return true
                         } else {
                             // The resumption has failed. Update the cell state and restart the receiver.
@@ -210,7 +206,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    /*
+    /**
        This method suspends a sender. If the sender's suspended coroutine is successfully placed
        in the cell, the method returns true. Otherwise, the coroutine is resumed and the method
        returns false, thus restarting the sender.
@@ -227,10 +223,10 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    /*
-       This method suspends a receiver. If the receiver's suspended coroutine is successfully
-       placed in the cell, the method invokes [expandBuffer] and returns true. Otherwise, the
-       coroutine is resumed and the method returns false, thus restarting the receiver.
+    /**
+       This method suspends a receiver. If the suspended receiver is successfully placed in the cell,
+       the method invokes [expandBuffer] and returns true. Otherwise, the coroutine is resumed and
+       the method returns false, thus restarting the receiver.
      */
     private suspend fun trySuspendReceiver(segment: ChannelSegment<E>, index: Int): Boolean {
         return suspendCancellableCoroutine { cont ->
@@ -246,10 +242,10 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    /*
+    /**
        Responsible for resuming a coroutine. The given value is the one that should be returned
-       in the suspension point. If the coroutine is successfully resumed, [tryResumeRequest]
-       returns true, otherwise it returns false.
+       in the suspension point. If the coroutine is successfully resumed, the method returns true,
+       otherwise it returns false.
      */
     @OptIn(InternalCoroutinesApi::class)
     private fun <T> CancellableContinuation<T>.tryResumeRequest(value: T): Boolean {
@@ -262,9 +258,17 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    private fun findSegmentSend(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
-        val segment = findAndMoveForwardSend(requiredId, startFrom)
-        return if (segment.id > requiredId) {
+    /**
+        This method finds the segment which contains non-interrupted cells and which id >= the
+        requested [id]. In case the required segment has not been created yet, this method attempts
+        to add it to the underlying linked list. Finally, it updates [sendSegment] to the found
+        segment if its [ChannelSegment.id] is greater than the one of the already stored segment.
+
+        In case the requested segment is already removed, the method returns `null`.
+     */
+    private fun findSegmentSend(id: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
+        val segment = sendSegment.findSegmentAndMoveForward(id, startFrom)
+        return if (segment.id > id) {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
             // Skip the sequence of interrupted cells by updating [sendersCounter].
@@ -276,9 +280,17 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    private fun findSegmentReceive(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
-        val segment = findAndMoveForwardReceive(requiredId, startFrom)
-        return if (segment.id > requiredId) {
+    /**
+        This method finds the segment which contains non-interrupted cells and which id >= the
+        requested [id]. In case the required segment has not been created yet, this method attempts
+        to add it to the underlying linked list. Finally, it updates [receiveSegment] to the found
+        segment if its [ChannelSegment.id] is greater than the one of the already stored segment.
+
+        In case the requested segment is already removed, the method returns `null`.
+     */
+    private fun findSegmentReceive(id: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
+        val segment = receiveSegment.findSegmentAndMoveForward(id, startFrom)
+        return if (segment.id > id) {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
             // Skip the sequence of interrupted cells by updating [receiversCounter].
@@ -290,8 +302,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    /*
-       Updates the `senders` counter if its value is lower that the specified one.
+    /**
+       Updates the [sendersCounter] if its value is lower that the specified one.
        Senders use this method to efficiently skip a sequence of cancelled receivers.
      */
     private fun updateSendersCounterIfLower(value: Long): Unit =
@@ -300,8 +312,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             if (sendersCounter.compareAndSet(curCounter, value)) return
         }
 
-    /*
-       Updates the `receivers` counter if its value is lower that the specified one.
+    /**
+       Updates the [receiversCounter] if its value is lower that the specified one.
        Receivers use this method to efficiently skip a sequence of cancelled senders.
      */
     private fun updateReceiversCounterIfLower(value: Long): Unit =
@@ -310,74 +322,49 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             if (receiversCounter.compareAndSet(curCounter, value)) return
         }
 
-    /*
-       These methods return the first segment which contains non-interrupted cells and which
-       id >= the required id. Depending on the request type, either `sendSegment` or
-       `receiveSegment` pointer is updated.
+    /**
+       This method returns the first segment which contains non-interrupted cells and which
+       id >= the required [id]. In case the required segment has not been created yet, the
+       method creates new segments and adds them to the underlying linked list.
+       After the desired segment is found and the `AtomicRef` pointer is successfully moved
+       to it, the segment is returned by the method.
      */
-    private fun findAndMoveForwardSend(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E> {
+    @Suppress("NOTHING_TO_INLINE")
+    internal inline fun <E> AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
+        id: Long,
+        startFrom: ChannelSegment<E>
+    ): ChannelSegment<E> {
         while (true) {
-            val segment = startFrom.findSegment(requiredId)
-            // Try to update `sendSegment` and restart if the found segment is logically removed
-            if (moveForwardSend(segment)) {
-                return segment
-            }
+            val dest = startFrom.findSegment(id)
+            // Try to update `value` and restart if the found segment is logically removed
+            if (moveForward(dest)) return dest
         }
     }
 
-    private fun findAndMoveForwardReceive(requiredId: Long, startFrom: ChannelSegment<E>): ChannelSegment<E> {
-        while (true) {
-            val segment = startFrom.findSegment(requiredId)
-            // Try to update `sendSegment` and restart if the found segment is logically removed
-            if (moveForwardReceive(segment)) {
-                return segment
-            }
-        }
-    }
-
-    /*
-       These methods help moving the pointers forward.
+    /**
+       This method helps moving the `AtomicRef` pointer forward.
        If the pointer is being moved to the segment which is logically removed, the method
-       returns false, thus forcing [findAndMoveForwardSend] (or [findAndMoveForwardReceive])
-       method to restart.
+       returns false, thus forcing [findSegmentAndMoveForward] method to restart.
      */
-    private fun moveForwardSend(to: ChannelSegment<E>): Boolean {
-        while (true) {
-            val cur = sendSegment.value
-            if (cur.id >= to.id) {
-                // No need to update the pointer, it was already updated by another request.
-                return true
-            }
-            if (to.isRemoved()) {
-                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardSend].
-                return false
-            }
-            if (sendSegment.compareAndSet(cur, to)) {
-                cur.tryRemoveSegment()
-                return true
-            }
+    @Suppress("NOTHING_TO_INLINE")
+    internal inline fun <E> AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean = loop { cur ->
+        if (cur.id >= to.id) {
+            // No need to update the pointer, it was already updated by another request.
+            return true
+        }
+        if (to.isRemoved()) {
+            // Trying to move pointer to the segment which is logically removed.
+            // Restart [AtomicRef<S>.findAndMoveForward].
+            return false
+        }
+        if (compareAndSet(cur, to)) {
+            // The segment was successfully moved.
+            cur.tryRemoveSegment()
+            return true
         }
     }
 
-    private fun moveForwardReceive(to: ChannelSegment<E>): Boolean {
-        while (true) {
-            val cur = receiveSegment.value
-            if (cur.id >= to.id) {
-                // No need to update the pointer, it was already updated by another request.
-                return true
-            }
-            if (to.isRemoved()) {
-                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardReceive].
-                return false
-            }
-            if (receiveSegment.compareAndSet(cur, to)) {
-                cur.tryRemoveSegment()
-                return true
-            }
-        }
-    }
-
-    /*
+    /**
        This method is responsible for updating the [bufferEnd] counter. It is called after
        `receive()` successfully performs its synchronization, either retrieving the first
        element, or storing its coroutine for suspension.
@@ -391,24 +378,24 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             // The `b`-th cell is going to be added to the buffer.
             val b = bufferEnd.getAndIncrement()
             val id = b / SEGMENT_SIZE
-            // After that, read the current `senders` counter.
-            // In case its value is lower than `b`, the `send(e)`
-            // invocation that will work with this `b`-th cell
-            // will detect that the cell is already a part of the
-            // buffer when comparing with the `bufferEnd` counter.
+            // After that, read the current `senders` counter. In case its value is lower than `b`,
+            // the `send(e)` invocation that will work with this `b`-th cell will detect that the
+            // cell is already a part of the buffer when comparing with the `bufferEnd` counter.
             if (b >= sendersCounter.value) {
-                // The cell is not covered by send() request. Increment the number
-                // of completed `expandBuffer()`-s and finish.
+                // The cell is not covered by send() request. Increment the number of
+                // completed `expandBuffer()`-s and finish.
                 incCompletedExpandBufferAttempts()
                 return
             }
+            // Is `bufferEndSegment` outdated or is the segment with the required id already removed?
+            // Find the required segment, creating new ones if needed.
             if (segment.id != id) {
                 segment = findSegmentBufferEnd(id, segment, b) ?:
                     // The required segment has been removed, restart `expandBuffer()`.
                     continue
             }
-            // Try to add the cell to the logical buffer, updating the cell
-            // state according to the algorithm.
+            // Try to add the cell to the logical buffer, updating the cell state
+            // according to the algorithm.
             val index = (b % SEGMENT_SIZE).toInt()
             if (updateCellOnExpandBuffer(segment, index, b)) {
                 // The cell has been added to the logical buffer.
@@ -426,7 +413,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
 
     private fun findSegmentBufferEnd(id: Long, startFrom: ChannelSegment<E>, currentBufferEndCounter: Long)
     : ChannelSegment<E>? {
-        val segment = findAndMoveForwardEB(startFrom, id)
+        val segment = bufferEndSegment.findSegmentAndMoveForward(id, startFrom)
         return if (segment.id > id) {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
@@ -443,34 +430,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    private fun findAndMoveForwardEB(startFrom: ChannelSegment<E>, requiredId: Long): ChannelSegment<E> {
-        while (true) {
-            val segment = startFrom.findSegment(requiredId)
-            // Try to update `bufferEndSegment` and restart if the found segment is logically removed
-            if (moveForwardEB(segment)) {
-                return segment
-            }
-        }
-    }
-
-    private fun moveForwardEB(to: ChannelSegment<E>): Boolean {
-        while (true) {
-            val cur = bufferEndSegment.value
-            if (cur.id >= to.id) {
-                // No need to update the pointer, it was already updated by another `expandBuffer()` invocation.
-                return true
-            }
-            if (to.isRemoved()) {
-                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardEB].
-                return false
-            }
-            if (bufferEndSegment.compareAndSet(cur, to)) {
-                return true
-            }
-        }
-    }
-
-    /*
+    /**
        This method returns true if [expandBuffer] should finish and false if [expandBuffer] should restart.
      */
     private fun updateCellOnExpandBuffer(segment: ChannelSegment<E>, index: Int, b: Long): Boolean {
@@ -511,14 +471,14 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
     }
 
-    /*
-       Increases the amount of completed `expandBuffer` invocations.
+    /**
+       Increases the amount of completed [expandBuffer] invocations.
      */
     private fun incCompletedExpandBufferAttempts(nAttempts: Long = 1) {
-//        completedExpandBuffers.addAndGet(nAttempts)
+        completedExpandBuffers.addAndGet(nAttempts)
     }
 
-    /*
+    /**
        Waits in a spin-loop until the [expandBuffer] call that should process the [globalIndex]-th
        cell is completed. Essentially, it waits until the numbers of started ([bufferEnd]) and
        completed ([completedExpandBuffers]) [expandBuffer] attempts coincide and become equal or
@@ -593,13 +553,16 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 }
 
-/* A waiter that stores a suspended coroutine. The process of resumption does not depend on
-   which suspended request (a sender or a receiver) is stored in the cell. */
+/**
+   A waiter that stores a suspended coroutine. The process of resumption does not depend on
+   which suspended request (a sender or a receiver) is stored in the cell.
+ */
 internal data class Coroutine(val cont: CancellableContinuation<Boolean>)
 
-/*
-   A waiter that stores a suspended coroutine with the `EB` marker. The marker means [expandBuffer]
-   needs to be completed depending on the resumption result. [expandBuffer] is invoked in case
-   the suspended request is the sender which fails to resume.
-*/
+/**
+   A waiter that stores a suspended coroutine with the `EB` marker. The marker is added when [expandBuffer]
+   cannot distinguish whether the coroutine stored in the cell is a suspended sender or receiver. Thus, the
+   [expandBuffer] completion is delegated to a request of the opposite type which will come to the cell
+   in the future.
+ */
 internal data class CoroutineEB(val cont: CancellableContinuation<Boolean>)
