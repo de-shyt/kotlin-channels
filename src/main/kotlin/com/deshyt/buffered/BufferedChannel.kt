@@ -46,8 +46,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     override suspend fun send(elem: E) {
-        // Read the segment reference before the counter increment;
-        // it is crucial to be able to find the required segment later.
+        // Read the segment reference before the counter increment; the order is crucial,
+        // otherwise there is a chance the required segment will not be found
         var segment = sendSegment.value
         while (true) {
             // Obtain the global index for this sender right before
@@ -119,8 +119,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     override suspend fun receive(): E {
-        // Read the segment reference before the counter increment;
-        // it is crucial to be able to find the required segment later.
+        // Read the segment reference before the counter increment; the order is crucial,
+        // otherwise there is a chance the required segment will not be found
         var segment = receiveSegment.value
         while (true) {
             // Obtain the global index for this receiver right before
@@ -383,8 +383,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
        element, or storing its coroutine for suspension.
      */
     private fun expandBuffer() {
-        // Read the current segment of
-        // the `expandBuffer()` procedure.
+        // Read the current segment of the `expandBuffer()` procedure.
         var segment = bufferEndSegment.value
         // Try to expand the buffer until succeed.
         while (true) {
@@ -536,22 +535,6 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
 
         @Suppress("ControlFlowWithEmptyBody")
         while (completedExpandBuffers.value <= globalIndex) {}
-
-//        repeat(EXPAND_BUFFER_COMPLETION_WAIT_ITERATIONS) {
-//            // Read the number of started buffer expansion calls.
-//            val b = bufferEnd.value
-//            // Read the number of completed buffer expansion calls.
-//            val ebCompleted = completedExpandBuffers.value
-//            if (b == ebCompleted && b == bufferEnd.value) return
-//        }
-
-//        while (true) {
-//            // Read the number of started buffer expansion calls.
-//            val b = bufferEnd.value
-//            // Read the number of completed buffer expansion calls.
-//            val ebCompleted = completedExpandBuffers.value
-//            if (b == ebCompleted && b == bufferEnd.value) return
-//        }
     }
 
     // ###################################
