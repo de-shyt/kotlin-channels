@@ -1,24 +1,26 @@
 package com.deshyt.rendezvous
 
 import com.deshyt.Channel
+import kotlinx.atomicfu.AtomicLong
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.loop
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 class RendezvousChannel<E> : Channel<E> {
-    /*
-      The counters show the total amount of senders and receivers ever performed.
-      The counters are incremented in the beginning of the corresponding operation, thus
-      acquiring a unique (for the operation type) cell to process.
+    /**
+       The counters show the total amount of senders and receivers ever performed. They are
+       incremented in the beginning of the corresponding operation, thus acquiring a unique
+       (for the operation type) cell to process.
      */
     private val sendersCounter = atomic(0L)
     private val receiversCounter = atomic(0L)
 
-    /*
-       The channel pointers indicate segments where values of `sendersCounter` and
-       `receiversCounter` are currently located.
+    /**
+       These channel pointers indicate segments where values of [sendersCounter] and
+       [receiversCounter] are currently located.
      */
     private val sendSegment: AtomicRef<ChannelSegment<E>>
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
@@ -30,17 +32,29 @@ class RendezvousChannel<E> : Channel<E> {
     }
 
     override suspend fun send(elem: E) {
+        // Read the segment reference before the counter increment; the order is crucial,
+        // otherwise there is a chance the required segment will not be found
+        var segment = sendSegment.value
         while (true) {
-            val startSegment = sendSegment.value
+            // Obtain the global index for this sender right before
+            // incrementing the `senders` counter.
             val s = sendersCounter.getAndIncrement()
-            val segment = findAndMoveForwardSend(startSegment = startSegment, destSegmentId = s / SEGMENT_SIZE)
-            if (segment.id != s / SEGMENT_SIZE) {
-                // The `sendSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                sendersCounter.compareAndSet(s + 1, segment.id * SEGMENT_SIZE)
-                continue
-            }
+            // Count the required segment id and the cell index in it.
+            val id = s / SEGMENT_SIZE
             val index = (s % SEGMENT_SIZE).toInt()
+            // Try to find the required segment if the initially obtained
+            // one (in the beginning of this function) has lower id.
+            if (segment.id != id) {
+                // Find the required segment.
+                segment = findSegmentSend(id, segment) ?:
+                    // The required segment has not been found, since it was full of cancelled
+                    // cells and, therefore, physically removed. Restart the sender.
+                    continue
+            }
+            // Place the element in the cell.
             segment.setElement(index, elem)
+            // Update the cell according to the algorithm. If the cell was poisoned or
+            // stores an interrupted receiver, clean the cell and restart the sender.
             if (updateCellOnSend(s, segment, index)) return
             segment.cleanElement(index)
         }
@@ -67,18 +81,29 @@ class RendezvousChannel<E> : Channel<E> {
     }
 
     override suspend fun receive(): E {
+        // Read the segment reference before the counter increment; the order is crucial,
+        // otherwise there is a chance the required segment will not be found
+        var segment = receiveSegment.value
         while (true) {
-            val startSegment = receiveSegment.value
+            // Obtain the global index for this receiver right before
+            // incrementing the `receivers` counter.
             val r = receiversCounter.getAndIncrement()
-            val segment = findAndMoveForwardReceive(startSegment = startSegment, destSegmentId = r / SEGMENT_SIZE)
-            if (segment.id != r / SEGMENT_SIZE) {
-                // The `receiveSegment` pointer was updated. Skip the segment(s) with INTERRUPTED cells
-                receiversCounter.compareAndSet(r + 1, segment.id * SEGMENT_SIZE)
-                continue
-            }
+            // Count the required segment id and the cell index in it.
+            val id = r / SEGMENT_SIZE
             val index = (r % SEGMENT_SIZE).toInt()
+            // Try to find the required segment if the initially obtained
+            // one (in the beginning of this function) has lower id.
+            if (segment.id != id) {
+                // Find the required segment.
+                segment = findSegmentReceive(id, segment) ?:
+                    // The required segment has not been found, since it was full of cancelled
+                    // cells and, therefore, physically removed. Restart the receiver.
+                    continue
+            }
+            // Update the cell according to the algorithm. If the rendezvous happened,
+            // the received value is returned, then the cell is cleaned to avoid memory
+            // leaks. Otherwise, the receiver restarts.
             if (updateCellOnReceive(r, segment, index)) {
-                // The element was successfully received. Return the value and clean the cell to avoid memory leaks
                 return segment.retrieveElement(index)
             }
         }
@@ -104,7 +129,7 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    /*
+    /**
        Responsible for making a rendezvous. In case there is a suspended coroutine in the cell,
        if the coroutine is successfully resumed, the cell is marked DONE; otherwise, it is
        marked BROKEN and resources are cleaned.
@@ -125,7 +150,7 @@ class RendezvousChannel<E> : Channel<E> {
         return false
     }
 
-    /*
+    /**
        Responsible for suspending a request. When the opposite request comes to the cell, it
        resumes the coroutine with the specified boolean value. This value is then returned by
        [trySuspendRequest].
@@ -134,7 +159,7 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private suspend fun trySuspendRequest(segment: ChannelSegment<E>, index: Int): Boolean {
         return suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation { segment.onInterrupt(index) }
+            cont.invokeOnCancellation { segment.onCancellation(index) }
             // Try to place the coroutine in the cell.
             if (!segment.casState(index, null, cont)) {
                 // The cell is occupied by the opposite request. Resume the coroutine.
@@ -143,7 +168,7 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    /*
+    /**
        Responsible for resuming a coroutine. The given value is the one that should be returned
        in the suspension point. If the coroutine is successfully resumed, [tryResumeRequest]
        returns true, otherwise it returns false.
@@ -159,72 +184,106 @@ class RendezvousChannel<E> : Channel<E> {
         }
     }
 
-    /*
-       These methods return the first segment which contains non-interrupted cells and which
-       id >= the requested `destSegmentId`. Depending on the request type, either `sendSegment` or
-       `receiveSegment` pointer is updated.
+    /**
+        This method finds the segment which contains non-interrupted cells and which id >= the
+        requested [id]. In case the required segment has not been created yet, this method attempts
+        to add it to the underlying linked list. Finally, it updates [sendSegment] to the found
+        segment if its [ChannelSegment.id] is greater than the one of the already stored segment.
+
+        In case the requested segment is already removed, the method returns `null`.
      */
-    private fun findAndMoveForwardSend(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        while (true) {
-            val destSegment = startSegment.findSegment(destSegmentId)
-            // Try to update `sendSegment` and restart if the found segment is logically removed
-            if (moveForwardSend(destSegment)) {
-                return destSegment
-            }
+    private fun findSegmentSend(id: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
+        val segment = sendSegment.findSegmentAndMoveForward(id, startFrom)
+        return if (segment.id > id) {
+            // The required segment has been removed; `segment` is the first
+            // segment with `id` not lower than the required one.
+            // Skip the sequence of interrupted cells by updating [sendersCounter].
+            sendersCounter.updateCounterIfLower(segment.id * SEGMENT_SIZE)
+            // As the required segment is already removed, return `null`.
+            null
+        } else {
+            // The required segment has been found, return it.
+            segment
         }
     }
 
-    private fun findAndMoveForwardReceive(startSegment: ChannelSegment<E>, destSegmentId: Long): ChannelSegment<E> {
-        while (true) {
-            val destSegment = startSegment.findSegment(destSegmentId)
-            // Try to update `sendSegment` and restart if the found segment is logically removed
-            if (moveForwardReceive(destSegment)) {
-                return destSegment
-            }
+    /**
+        This method finds the segment which contains non-interrupted cells and which id >= the
+        requested [id]. In case the required segment has not been created yet, this method attempts
+        to add it to the underlying linked list. Finally, it updates [receiveSegment] to the found
+        segment if its [ChannelSegment.id] is greater than the one of the already stored segment.
+
+        In case the requested segment is already removed, the method returns `null`.
+     */
+    private fun findSegmentReceive(id: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
+        val segment = receiveSegment.findSegmentAndMoveForward(id, startFrom)
+        return if (segment.id > id) {
+            // The required segment has been removed; `segment` is the first
+            // segment with `id` not lower than the required one.
+            // Skip the sequence of interrupted cells by updating [receiversCounter].
+            receiversCounter.updateCounterIfLower(segment.id * SEGMENT_SIZE)
+            // As the required segment is already removed, return `null`.
+            null
+        } else {
+            // The required segment has been found, return it.
+            segment
         }
     }
 
-    /*
-       These methods help moving the pointers forward.
+    /**
+        Updates the counter ([sendersCounter] or [receiversCounter]) if its value is lower than
+        the specified one. The method is used to efficiently skip a sequence of cancelled cells
+        in [findSegmentSend] and [findSegmentReceive].
+     */
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun AtomicLong.updateCounterIfLower(value: Long): Unit =
+        loop { curCounter ->
+            if (curCounter >= value) return
+            if (compareAndSet(curCounter, value)) return
+        }
+
+    /**
+       This method returns the first segment which contains non-interrupted cells and which
+       id >= the required [id]. In case the required segment has not been created yet, the
+       method creates new segments and adds them to the underlying linked list.
+       After the desired segment is found and the `AtomicRef` pointer is successfully moved
+       to it, the segment is returned by the method.
+     */
+    @Suppress("NOTHING_TO_INLINE")
+    internal inline fun <E> AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
+        id: Long,
+        startFrom: ChannelSegment<E>
+    ): ChannelSegment<E> {
+        while (true) {
+            val dest = startFrom.findSegment(id)
+            // Try to update `value` and restart if the found segment is logically removed
+            if (moveForward(dest)) return dest
+        }
+    }
+
+    /**
+       This method helps moving the `AtomicRef` pointer forward.
        If the pointer is being moved to the segment which is logically removed, the method
-       returns false, thus forcing [findAndMoveForwardSend] (or [findAndMoveForwardReceive])
-       method to restart.
+       returns false, thus forcing [findSegmentAndMoveForward] method to restart.
      */
-    private fun moveForwardSend(to: ChannelSegment<E>): Boolean {
-        while (true) {
-            val cur = sendSegment.value
+    @Suppress("NOTHING_TO_INLINE")
+    internal inline fun <E> AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean =
+        loop { cur ->
             if (cur.id >= to.id) {
                 // No need to update the pointer, it was already updated by another request.
                 return true
             }
-            if (to.isRemoved()) {
-                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardSend].
+            if (to.isRemoved) {
+                // Trying to move pointer to the segment which is logically removed.
+                // Restart [AtomicRef<S>.findAndMoveForward].
                 return false
             }
-            if (sendSegment.compareAndSet(cur, to)) {
+            if (compareAndSet(cur, to)) {
+                // The segment was successfully moved.
                 cur.tryRemoveSegment()
                 return true
             }
         }
-    }
-
-    private fun moveForwardReceive(to: ChannelSegment<E>): Boolean {
-        while (true) {
-            val cur = receiveSegment.value
-            if (cur.id >= to.id) {
-                // No need to update the pointer, it was already updated by another request.
-                return true
-            }
-            if (to.isRemoved()) {
-                // Trying to move pointer to the segment which is logically removed. Restart [findAndMoveForwardReceive].
-                return false
-            }
-            if (receiveSegment.compareAndSet(cur, to)) {
-                cur.tryRemoveSegment()
-                return true
-            }
-        }
-    }
 
     // ###################################
     // # Validation of the channel state #
@@ -236,7 +295,7 @@ class RendezvousChannel<E> : Channel<E> {
         /* Check that the `prev` link of the leftmost segment is correct. The link can be non-null, if it points
            to the segment which cells were all used by the requests and not all of them were interrupted. */
         val prev = firstSegment.getPrev()
-        check(prev == null || !prev.isRemoved()) { "Channel $this: the `prev` link of the leftmost segment is not null." }
+        check(prev == null || !prev.isRemoved) { "Channel $this: the `prev` link of the leftmost segment is not null." }
 
         var curSegment: ChannelSegment<E>? = firstSegment
         while (curSegment != null) {
@@ -248,7 +307,7 @@ class RendezvousChannel<E> : Channel<E> {
 
             // Check that the removed segments are not reachable from the list.
             // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
-            check(!curSegment.isRemoved() || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            check(!curSegment.isRemoved || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
             curSegment.validate()
@@ -273,7 +332,7 @@ class RendezvousChannel<E> : Channel<E> {
      */
     private fun getFirstSegment(): ChannelSegment<E> {
         var cur = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
-        while (cur.isRemoved() && cur.getNext() != null) {
+        while (cur.isRemoved && cur.getNext() != null) {
             cur = cur.getNext()!!
         }
         return cur
