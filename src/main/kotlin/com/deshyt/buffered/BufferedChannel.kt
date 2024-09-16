@@ -1,6 +1,7 @@
 package com.deshyt.buffered
 
 import com.deshyt.Channel
+import kotlinx.atomicfu.AtomicLong
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.loop
@@ -31,8 +32,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val completedExpandBuffers = atomic(capacity)
 
     /**
-       These channel pointers indicate segments where values of [sendersCounter] and
-       [receiversCounter] are currently located.
+       These channel pointers indicate segments where values of [sendersCounter], [receiversCounter]
+       and [bufferEnd] are currently located.
      */
     private val sendSegment: AtomicRef<ChannelSegment<E>>
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
@@ -250,11 +251,11 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     @OptIn(InternalCoroutinesApi::class)
     private fun <T> CancellableContinuation<T>.tryResumeRequest(value: T): Boolean {
         val token = tryResume(value)
-        if (token != null) {
+        return if (token != null) {
             completeResume(token)
-            return true
+            true
         } else {
-            return false
+            false
         }
     }
 
@@ -272,7 +273,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
             // Skip the sequence of interrupted cells by updating [sendersCounter].
-            updateSendersCounterIfLower(segment.id * SEGMENT_SIZE)
+            sendersCounter.updateCounterIfLower(segment.id * SEGMENT_SIZE)
+            // As the required segment is already removed, return `null`.
             null
         } else {
             // The required segment has been found, return it.
@@ -294,7 +296,8 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
             // Skip the sequence of interrupted cells by updating [receiversCounter].
-            updateReceiversCounterIfLower(segment.id * SEGMENT_SIZE)
+            receiversCounter.updateCounterIfLower(segment.id * SEGMENT_SIZE)
+            // As the required segment is already removed, return `null`.
             null
         } else {
             // The required segment has been found, return it.
@@ -303,23 +306,15 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     /**
-       Updates the [sendersCounter] if its value is lower that the specified one.
-       Senders use this method to efficiently skip a sequence of cancelled receivers.
+        Updates the counter ([sendersCounter] or [receiversCounter]) if its value is lower than
+        the specified one. The method is used to efficiently skip a sequence of cancelled cells
+        in [findSegmentSend] and [findSegmentReceive].
      */
-    private fun updateSendersCounterIfLower(value: Long): Unit =
-        sendersCounter.loop { curCounter ->
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun AtomicLong.updateCounterIfLower(value: Long): Unit =
+        loop { curCounter ->
             if (curCounter >= value) return
-            if (sendersCounter.compareAndSet(curCounter, value)) return
-        }
-
-    /**
-       Updates the [receiversCounter] if its value is lower that the specified one.
-       Receivers use this method to efficiently skip a sequence of cancelled senders.
-     */
-    private fun updateReceiversCounterIfLower(value: Long): Unit =
-        receiversCounter.loop { curCounter ->
-            if (curCounter >= value) return
-            if (receiversCounter.compareAndSet(curCounter, value)) return
+            if (compareAndSet(curCounter, value)) return
         }
 
     /**
@@ -352,7 +347,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             // No need to update the pointer, it was already updated by another request.
             return true
         }
-        if (to.isRemoved()) {
+        if (to.isRemoved) {
             // Trying to move pointer to the segment which is logically removed.
             // Restart [AtomicRef<S>.findAndMoveForward].
             return false
@@ -423,6 +418,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             } else {
                 incCompletedExpandBufferAttempts()
             }
+            // As the required segment is already removed, return `null`.
             null
         } else {
             // The required segment has been found, return it.
@@ -443,12 +439,12 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                     if (b >= receiversCounter.value) {
                         // Suspended sender, since the cell is not covered by a receiver. Try to resume it.
                         if (segment.casState(index, state, CellState.RESUMING_BY_EB)) {
-                            if (state.cont.tryResumeRequest(true)) {
+                            return if (state.cont.tryResumeRequest(true)) {
                                 segment.setState(index, CellState.BUFFERED)
-                                return true
+                                true
                             } else {
                                 segment.onCancellation(index = index, isSender = true)
-                                return false
+                                false
                             }
                         }
                     }
@@ -465,8 +461,10 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 CellState.INTERRUPTED_RCV -> return true
                 // Poisoned cell => finish, receive() is in charge
                 CellState.POISONED -> return true
-                // A receiver is resuming the sender => wait
+                // A receiver is resuming the sender => wait in a spin loop until it changes
+                // the state to either `DONE_RCV` or `INTERRUPTED_SEND`
                 CellState.RESUMING_BY_RCV -> continue
+                else -> error("Unexpected cell state: $state")
             }
         }
     }
@@ -546,7 +544,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
      */
     private fun getFirstSegment(): ChannelSegment<E> {
         var cur = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
-        while (cur.isRemoved() && cur.getNext() != null) {
+        while (cur.isRemoved && cur.getNext() != null) {
             cur = cur.getNext()!!
         }
         return cur
