@@ -1,10 +1,7 @@
 package com.deshyt.buffered
 
 import com.deshyt.Channel
-import kotlinx.atomicfu.AtomicLong
-import kotlinx.atomicfu.AtomicRef
-import kotlinx.atomicfu.atomic
-import kotlinx.atomicfu.loop
+import kotlinx.atomicfu.*
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -25,11 +22,16 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val bufferEnd = atomic(capacity)
 
     /**
-       This is the counter of completed [expandBuffer] invocations. It is used for maintaining
-       the guarantee that [expandBuffer] is invoked on every cell.
+       This is the counter of completed [expandBuffer] invocations. When a receiver is cancelled,
+       the corresponding cell might be physically removed from the segment list to avoid memory
+       leaks, while it still can be unprocessed by `expandBuffer()`. In this case, `expandBuffer()`
+       cannot know whether the removed cell contained sender or receiver and, therefore, cannot
+       proceed. To solve the race, we ensure that cells which store cancelled receivers cannot be
+       physically removed until the cell is processed.
+
        Initially, its value is equal to the buffer capacity.
      */
-    private val completedExpandBuffers = atomic(capacity)
+    private val completedExpandBuffersAndFlag = atomic(capacity)
 
     /**
        These channel pointers indicate segments where values of [sendersCounter], [receiversCounter]
@@ -432,7 +434,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                     if (b >= receiversCounter.value) {
                         // Suspended sender, since the cell is not covered by a receiver. Try to resume it.
                         if (segment.casState(index, state, CellState.RESUMING_BY_EB)) {
-                            return if (state.cont.tryResumeRequest(true)) {
+                            return if (tryResumeRequest(state.cont)) {
                                 segment.setState(index, CellState.BUFFERED)
                                 true
                             } else {
@@ -466,7 +468,14 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
        Increases the amount of completed [expandBuffer] invocations.
      */
     private fun incCompletedExpandBufferAttempts(nAttempts: Long = 1) {
-        completedExpandBuffers.addAndGet(nAttempts)
+        completedExpandBuffersAndFlag.addAndGet(nAttempts).also {
+            // Should further `expandBuffer()`-s be paused? If so, this thread should wait in
+            // a spin-loop until the flag is unset.
+            if (it.ebPauseExpandBuffers) {
+                @Suppress("ControlFlowWithEmptyBody")
+                while (completedExpandBuffersAndFlag.value.ebPauseExpandBuffers) {}
+            }
+        }
     }
 
     /**
@@ -483,9 +492,33 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         // Now it is guaranteed that the `expandBuffer()` call that should process the
         // required cell has been started. Wait in an infinite loop until the numbers of
         // started and completed buffer expansion calls coincide.
-
-        @Suppress("ControlFlowWithEmptyBody")
-        while (completedExpandBuffers.value <= globalIndex) {}
+        while (true) {
+            // Read the number of started buffer expansion calls.
+            val b = bufferEnd.value
+            // Read the number of completed buffer expansion calls along with the flag
+            // that pauses further progress.
+            val ebCompletedAndBit = completedExpandBuffersAndFlag.value
+            val ebCompleted = ebCompletedAndBit.ebCompletedCounter
+            val pauseExpandBuffers = ebCompletedAndBit.ebPauseExpandBuffers
+            // Do the numbers of started and completed calls coincide?
+            // Note that we need to re-read the number of started `expandBuffer()` calls
+            // to obtain a correct snapshot.
+            if (b == ebCompleted && b == bufferEnd.value) {
+                // Unset the flag, which pauses progress, and finish.
+                completedExpandBuffersAndFlag.update {
+                    constructEBCompletedAndPauseFlag(it.ebCompletedCounter, false)
+                }
+                return
+            }
+            // It is possible that a concurrent caller of this method has unset the flag, which
+            // pauses further progress to avoid starvation. In this case, set the flag back.
+            if (!pauseExpandBuffers) {
+                completedExpandBuffersAndFlag.compareAndSet(
+                    ebCompletedAndBit,
+                    constructEBCompletedAndPauseFlag(ebCompleted, true)
+                )
+            }
+        }
     }
 
     // ###################################
@@ -557,3 +590,16 @@ internal data class Coroutine(val cont: CancellableContinuation<Boolean>)
    in the future.
  */
 internal data class CoroutineEB(val cont: CancellableContinuation<Boolean>)
+
+/**
+  The `completedExpandBuffersAndPauseFlag` 64-bit counter contains
+  the number of completed `expandBuffer()` attempts along with a special
+  flag that pauses progress to avoid starvation in `waitExpandBufferCompletion(..)`.
+  The code below encapsulates the required bit arithmetics.
+ */
+private const val EB_COMPLETED_PAUSE_EXPAND_BUFFERS_BIT = 1L shl 62
+private const val EB_COMPLETED_COUNTER_MASK = EB_COMPLETED_PAUSE_EXPAND_BUFFERS_BIT - 1
+private inline val Long.ebCompletedCounter get() = this and EB_COMPLETED_COUNTER_MASK
+private inline val Long.ebPauseExpandBuffers: Boolean get() = (this and EB_COMPLETED_PAUSE_EXPAND_BUFFERS_BIT) != 0L
+private fun constructEBCompletedAndPauseFlag(counter: Long, pauseEB: Boolean): Long =
+    (if (pauseEB) EB_COMPLETED_PAUSE_EXPAND_BUFFERS_BIT else 0) + counter
