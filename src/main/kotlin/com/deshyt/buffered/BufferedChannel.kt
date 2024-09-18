@@ -432,7 +432,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                     if (b >= receiversCounter.value) {
                         // Suspended sender, since the cell is not covered by a receiver. Try to resume it.
                         if (segment.casState(index, state, CellState.RESUMING_BY_EB)) {
-                            return if (state.cont.tryResumeRequest(true)) {
+                            return if (tryResumeRequest(state.cont)) {
                                 segment.setState(index, CellState.BUFFERED)
                                 true
                             } else {
