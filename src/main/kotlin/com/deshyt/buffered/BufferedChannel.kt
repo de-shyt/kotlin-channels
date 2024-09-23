@@ -483,9 +483,14 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         // Now it is guaranteed that the `expandBuffer()` call that should process the
         // required cell has been started. Wait in an infinite loop until the numbers of
         // started and completed buffer expansion calls coincide.
-
-        @Suppress("ControlFlowWithEmptyBody")
-        while (completedExpandBuffers.value <= globalIndex) {}
+        while (true) {
+            val b = bufferEnd.value
+            val completedEB = completedExpandBuffers.value
+            // Do the numbers of started and completed [expandBuffer]-s coincide?
+            // The comparison with [bufferEnd] guarantees that, if `b == completedEB`, then all
+            // [expandBuffer]-s invoked on the cells before the [globalIndex]-th one have finished.
+            if (b == completedEB && b == bufferEnd.value) return
+        }
     }
 
     // ###################################
