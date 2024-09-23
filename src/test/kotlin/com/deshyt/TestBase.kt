@@ -12,7 +12,7 @@ abstract class TestBase(
     @Test
     fun modelCheckingTest() = ModelCheckingOptions()
         .iterations(scenarios)
-        .invocationsPerIteration(invokePerScenarioAmount(false))
+        .invocationsPerIteration(invokePerScenarioAmount(true))
         .threads(threadsAmount)
         .actorsBefore(actorsBeforeAmount)
         .actorsPerThread(actorsPerThreadAmount)

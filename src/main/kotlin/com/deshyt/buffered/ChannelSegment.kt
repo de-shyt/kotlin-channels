@@ -253,4 +253,4 @@ enum class CellState {
     RESUMING_BY_RCV, RESUMING_BY_EB
 }
 
-const val SEGMENT_SIZE = 2
+const val SEGMENT_SIZE = 1

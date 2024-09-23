@@ -15,14 +15,14 @@ abstract class ChannelTestBase(
     override val sequentialSpecification: Class<*>,
 ) : TestBase(sequentialSpecification) {
 
-    @Operation(allowExtraSuspension = true, blocking = true)
+    @Operation(blocking = true)
     suspend fun send(@Param(name = "elem") elem: Int): Any = try {
         c.send(elem)
     } catch (e: NumberedCancellationException) {
         e.testResult
     }
 
-    @Operation(allowExtraSuspension = true, blocking = true)
+    @Operation(blocking = true, cancellableOnSuspension = false)
     suspend fun receive(): Any = try {
         c.receive()
     } catch (e: NumberedCancellationException) {
