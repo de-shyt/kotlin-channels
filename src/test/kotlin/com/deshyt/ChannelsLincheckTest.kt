@@ -23,7 +23,7 @@ class Buffered2ChannelTest : ChannelTestBase(
 class Buffered1ChannelTest : ChannelTestBase(
     c = BufferedChannel(1),
     sequentialSpecification = SequentialBuffered1Channel::class.java,
-    listOf()
+    customScenarios = listOf()
 )
 
 // Sequential specification for a rendezvous channel
