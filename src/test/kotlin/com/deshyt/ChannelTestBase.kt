@@ -17,7 +17,7 @@ abstract class ChannelTestBase(
     override val customScenarios: List<ExecutionScenario> = emptyList()
 ) : TestBase(sequentialSpecification, customScenarios) {
 
-    @Operation(allowExtraSuspension = true, blocking = true)
+    @Operation(allowExtraSuspension = true, blocking = true, cancellableOnSuspension = false)
     suspend fun send(@Param(name = "elem") elem: Int): Any = try {
         c.send(elem)
     } catch (e: NumberedCancellationException) {

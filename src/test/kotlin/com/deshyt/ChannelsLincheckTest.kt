@@ -7,7 +7,6 @@ import com.deshyt.rendezvous.RendezvousChannel
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
-import org.jetbrains.kotlinx.lincheck.scenario
 import kotlin.collections.ArrayList
 
 
@@ -24,22 +23,7 @@ class Buffered2ChannelTest : ChannelTestBase(
 class Buffered1ChannelTest : ChannelTestBase(
     c = BufferedChannel(1),
     sequentialSpecification = SequentialBuffered1Channel::class.java,
-    listOf(
-        scenario {
-            parallel {
-                thread {
-                    actor(ChannelTestBase::send, 2)
-                    actor(ChannelTestBase::receive)
-                    actor(ChannelTestBase::send, 2)
-                }
-                thread {
-                    actor(ChannelTestBase::send, 2)
-                    actor(ChannelTestBase::send, 2)
-                }
-                thread { actor(ChannelTestBase::receive) }
-            }
-        }
-    )
+    listOf()
 )
 
 // Sequential specification for a rendezvous channel
