@@ -40,6 +40,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
     init {
+        require(capacity > 0) { "Invalid capacity ($capacity) for a buffered channel, should be >= 1." }
         val firstSegment = ChannelSegment(id = 0, prevSegment = null, channel = this)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
