@@ -22,6 +22,7 @@ abstract class TestBase(
         .checkObstructionFreedom()
         .apply { customScenarios.forEach { scenario -> addCustomScenario(scenario) } }
         .sequentialSpecification(sequentialSpecification)
+        .logLevel(LoggingLevel.INFO)
         .check(this::class)
 
     @Test

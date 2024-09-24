@@ -38,6 +38,17 @@ class Buffered1ChannelTest : ChannelTestBase(
                 }
                 thread { actor(ChannelTestBase::receive) }
             }
+        },
+        scenario {
+            parallel {
+                thread {
+                    actor(ChannelTestBase::send, 2)
+                    actor(ChannelTestBase::receive)
+                    actor(ChannelTestBase::send, 2)
+                }
+                thread { actor(ChannelTestBase::send, 2) }
+                thread { actor(ChannelTestBase::receive) }
+            }
         }
     )
 )
