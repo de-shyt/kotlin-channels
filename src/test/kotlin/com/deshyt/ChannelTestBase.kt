@@ -3,6 +3,7 @@ package com.deshyt
 import org.jetbrains.kotlinx.lincheck.annotations.Operation
 import org.jetbrains.kotlinx.lincheck.annotations.Param
 import org.jetbrains.kotlinx.lincheck.annotations.Validate
+import org.jetbrains.kotlinx.lincheck.execution.ExecutionScenario
 import org.jetbrains.kotlinx.lincheck.paramgen.IntGen
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -13,7 +14,8 @@ import kotlin.coroutines.cancellation.CancellationException
 abstract class ChannelTestBase(
     protected val c: Channel<Int>,
     override val sequentialSpecification: Class<*>,
-) : TestBase(sequentialSpecification) {
+    override val customScenarios: List<ExecutionScenario> = emptyList()
+) : TestBase(sequentialSpecification, customScenarios) {
 
     @Operation(allowExtraSuspension = true, blocking = true)
     suspend fun send(@Param(name = "elem") elem: Int): Any = try {
