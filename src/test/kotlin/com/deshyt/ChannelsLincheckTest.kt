@@ -36,7 +36,9 @@ class Buffered1ChannelTest : ChannelTestBase(
                     blockingActor(Buffered1ChannelTest::send, 2)
                     blockingActor(Buffered1ChannelTest::send, 2)
                 }
-                thread { blockingActor(Buffered1ChannelTest::receive) }
+                thread {
+                    blockingActor(Buffered1ChannelTest::receive)
+                }
             }
         },
         scenario {
@@ -46,25 +48,29 @@ class Buffered1ChannelTest : ChannelTestBase(
                     blockingActor(Buffered1ChannelTest::receive)
                     blockingActor(Buffered1ChannelTest::send, 2)
                 }
-                thread { blockingActor(Buffered1ChannelTest::send, 2) }
-                thread { blockingActor(Buffered1ChannelTest::receive) }
+                thread {
+                    blockingActor(Buffered1ChannelTest::send, 2)
+                }
+                thread {
+                    blockingActor(Buffered1ChannelTest::receive)
+                }
             }
         },
-//        scenario {
-//            parallel {
-//                thread {
-//                    blockingActor(Buffered1ChannelTest::send, 3)
-//                    blockingActor(Buffered1ChannelTest::send, 3)
-//                }
-//                thread {
-//                    blockingActor(Buffered1ChannelTest::receive)
-//                }
-//                thread {
-//                    blockingActor(Buffered1ChannelTest::receive)
-//                    blockingActor(Buffered1ChannelTest::send, 2)
-//                }
-//            }
-//        }
+        scenario {
+            parallel {
+                thread {
+                    blockingActor(Buffered1ChannelTest::send, 3)
+                    blockingActor(Buffered1ChannelTest::send, 3)
+                }
+                thread {
+                    blockingActor(Buffered1ChannelTest::receive)
+                }
+                thread {
+                    blockingActor(Buffered1ChannelTest::receive)
+                    blockingActor(Buffered1ChannelTest::send, 3)
+                }
+            }
+        }
     )
 )
 
