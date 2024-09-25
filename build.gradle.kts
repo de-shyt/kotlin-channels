@@ -12,9 +12,19 @@ plugins {
 dependencies {
     implementation(kotlin("stdlib-jdk8"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0-RC")
+
+    // Dependencies required by "lincheck-jvm-2.34-snapshot" JAR file
+    implementation("org.jetbrains.kotlin:kotlin-reflect:2.0.20")
+    implementation("net.bytebuddy:byte-buddy-agent:1.15.1")
+    implementation("org.ow2.asm:asm:9.3")
+    implementation("org.ow2.asm:asm-util:9.4")
+
     testImplementation("junit:junit:4.13.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0-RC")
-    testImplementation("org.jetbrains.kotlinx:lincheck:2.34")
+
+    // Dependencies required by "lincheck-jvm-2.34-snapshot" JAR file
+    testImplementation(files("$rootDir/build/libs/lincheck-jvm-2.34-snapshot.jar"))
+    testImplementation("org.ow2.asm:asm-commons:9.7")
 }
 
 repositories {
