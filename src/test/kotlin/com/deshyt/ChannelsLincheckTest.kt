@@ -24,23 +24,7 @@ class Buffered2ChannelTest : ChannelTestBase(
 class Buffered1ChannelTest : ChannelTestBase(
     c = BufferedChannel(1),
     sequentialSpecification = SequentialBuffered1Channel::class.java,
-    listOf(
-        scenario {
-            parallel {
-                thread {
-                    blockingActor(Buffered1ChannelTest::send, 2)
-                    blockingActor(Buffered1ChannelTest::receive)
-                    blockingActor(Buffered1ChannelTest::send, 2)
-                }
-                thread {
-                    blockingActor(Buffered1ChannelTest::send, 2)
-                    blockingActor(Buffered1ChannelTest::send, 2)
-                }
-                thread {
-                    blockingActor(Buffered1ChannelTest::receive)
-                }
-            }
-        },
+    customScenarios = listOf(
         scenario {
             parallel {
                 thread {
@@ -53,21 +37,6 @@ class Buffered1ChannelTest : ChannelTestBase(
                 }
                 thread {
                     blockingActor(Buffered1ChannelTest::receive)
-                }
-            }
-        },
-        scenario {
-            parallel {
-                thread {
-                    blockingActor(Buffered1ChannelTest::send, 3)
-                    blockingActor(Buffered1ChannelTest::send, 3)
-                }
-                thread {
-                    blockingActor(Buffered1ChannelTest::receive)
-                }
-                thread {
-                    blockingActor(Buffered1ChannelTest::receive)
-                    blockingActor(Buffered1ChannelTest::send, 3)
                 }
             }
         }
