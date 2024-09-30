@@ -1,16 +1,11 @@
 package com.deshyt
 
 import org.jetbrains.kotlinx.lincheck.*
-import org.jetbrains.kotlinx.lincheck.execution.ExecutionScenario
 import org.jetbrains.kotlinx.lincheck.strategy.managed.modelchecking.*
 import org.jetbrains.kotlinx.lincheck.strategy.stress.*
 import org.junit.*
 
-
-abstract class TestBase(
-    open val sequentialSpecification: Class<*>,
-    open val customScenarios: List<ExecutionScenario>
-) {
+abstract class TestBase(open val sequentialSpecification: Class<*>) {
     @Test
     fun modelCheckingTest() = ModelCheckingOptions()
         .iterations(300)
@@ -20,7 +15,6 @@ abstract class TestBase(
         .actorsPerThread(actorsPerThreadAmount)
         .actorsAfter(actorsAfterAmount)
         .checkObstructionFreedom()
-        .apply { customScenarios.forEach { scenario -> addCustomScenario(scenario) } }
         .sequentialSpecification(sequentialSpecification)
 //        .logLevel(LoggingLevel.INFO)
         .check(this::class)

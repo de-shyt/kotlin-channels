@@ -14,10 +14,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0-RC")
     testImplementation("junit:junit:4.13.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0-RC")
-    testImplementation("org.jetbrains.kotlinx:lincheck:2.34-SNAPSHOT")
+    testImplementation("org.jetbrains.kotlinx:lincheck:2.34")
 }
 
 repositories {
-    mavenLocal()
     mavenCentral()
 }
