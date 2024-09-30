@@ -29,10 +29,10 @@ class Buffered1ChannelTest : ChannelTestBase(
             parallel {
                 thread {
                     blockingActor(Buffered1ChannelTest::send, 2)
-                    blockingActor(Buffered1ChannelTest::receive)
-                    blockingActor(Buffered1ChannelTest::send, 2)
                 }
                 thread {
+                    blockingActor(Buffered1ChannelTest::send, 2)
+                    blockingActor(Buffered1ChannelTest::receive)
                     blockingActor(Buffered1ChannelTest::send, 2)
                 }
                 thread {
