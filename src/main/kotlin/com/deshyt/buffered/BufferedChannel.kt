@@ -40,6 +40,7 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
     init {
+        require(capacity > 0) { "Invalid capacity ($capacity) for a buffered channel, should be >= 1." }
         val firstSegment = ChannelSegment(id = 0, prevSegment = null, channel = this)
         sendSegment = atomic(firstSegment)
         receiveSegment = atomic(firstSegment)
@@ -187,19 +188,19 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                         val helpExpandBuffer = state is CoroutineEB
                         // Extract the sender's coroutine and try to resume it
                         val sender = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
-                        if (sender.tryResumeRequest(true)) {
+                        return if (sender.tryResumeRequest(true)) {
                             // The sender was resumed successfully. Update the cell state, expand the buffer and finish.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // finish, as the sender is resumed. Thus, no further action is required.
                             segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
-                            return true
+                            true
                         } else {
                             // The resumption has failed. Update the cell state and restart the receiver.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // skip this cell, so `expandBuffer()` should be called once again.
                             segment.onCancellation(index = index, isSender = true)
                             if (helpExpandBuffer) expandBuffer()
-                            return false
+                            false
                         }
                     }
                 }
@@ -457,9 +458,9 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 CellState.DONE_RCV -> return true
                 // The sender was interrupted => restart
                 CellState.INTERRUPTED_SEND -> return false
-                // The receiver was interrupted => finish
+                // The receiver was interrupted => finish, expandBuffer() was invoked before the receiver was suspended
                 CellState.INTERRUPTED_RCV -> return true
-                // Poisoned cell => finish, receive() is in charge
+                // Poisoned cell => finish, the receiver that poisoned the cell is in charge
                 CellState.POISONED -> return true
                 // A receiver is resuming the sender => wait in a spin loop until it changes
                 // the state to either `DONE_RCV` or `INTERRUPTED_SEND`
@@ -490,9 +491,14 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         // Now it is guaranteed that the `expandBuffer()` call that should process the
         // required cell has been started. Wait in an infinite loop until the numbers of
         // started and completed buffer expansion calls coincide.
-
-        @Suppress("ControlFlowWithEmptyBody")
-        while (completedExpandBuffers.value <= globalIndex) {}
+        while (true) {
+            val b = bufferEnd.value
+            val completedEB = completedExpandBuffers.value
+            // Do the numbers of started and completed [expandBuffer]-s coincide?
+            // The comparison with [bufferEnd] guarantees that, if `b == completedEB`, then all
+            // [expandBuffer]-s invoked on the cells before the [globalIndex]-th one have finished.
+            if (b == completedEB && b == bufferEnd.value) return
+        }
     }
 
     // ###################################
