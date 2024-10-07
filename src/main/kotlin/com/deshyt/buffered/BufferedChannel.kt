@@ -9,7 +9,7 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class BufferedChannel<E>(capacity: Long) : Channel<E> {
+class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     /**
       The counters show the total amount of senders and receivers ever performed. They are
       incremented in the beginning of the corresponding operation, thus acquiring a unique
@@ -84,22 +84,30 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         index: Int
     ): Boolean {
         while (true) {
-            val state = segment.getState(index)
-            val b = bufferEnd.value
-            val r = receiversCounter.value
-            when {
-                // Empty and either the cell is in the buffer or a receiver is coming => buffer
-                state == null && (s < r || s < b) || state == CellState.IN_BUFFER -> {
+            when (val state = segment.getState(index)) {
+                // The cell is empty.
+                null -> {
+                    // If the cell is in the buffer or a receiver is coming, try to buffer
+                    // the element. Otherwise, try to place the sleeping sender in the cell.
+                    if (bufferOrRendezvousSend(s)) {
+                        // Move the cell state to `BUFFERED`.
+                        if (segment.casState(index, null, CellState.BUFFERED)) {
+                            // The element has been successfully buffered, finish.
+                            return true
+                        }
+                    } else {
+                        // The sender should suspend.
+                        if (trySuspendSender(segment, index)) return true
+                    }
+                }
+                // The cell is in the logical buffer => try to buffer the element
+                CellState.IN_BUFFER -> {
                     if (segment.casState(index, state, CellState.BUFFERED)) return true
                 }
-                // Empty, the cell is not in the buffer and no receiver is coming => suspend
-                state == null && s >= b && s >= r -> {
-                    if (trySuspendSender(segment, index)) return true
-                }
                 // The cell was poisoned by a receiver => restart the sender
-                state == CellState.POISONED -> return false
+                CellState.POISONED -> return false
                 // Cancelled receiver => restart the sender
-                state == CellState.INTERRUPTED_RCV -> return false
+                CellState.INTERRUPTED_RCV -> return false
                 // Suspended receiver in the cell => try to resume it
                 else -> {
                     val receiver = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
@@ -155,29 +163,36 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         index: Int
     ): Boolean {
         while (true) {
-            val state = segment.getState(index)
-            val s = sendersCounter.value
-            when {
-                // The cell is empty and no sender is coming => suspend
-                (state == null || state == CellState.IN_BUFFER) && r >= s -> {
-                    if (trySuspendReceiver(segment, index)) return true
-                }
-                // The cell is empty but a sender is coming => poison & restart
-                (state == null || state == CellState.IN_BUFFER) && r < s -> {
-                    if (segment.casState(index, state, CellState.POISONED)) {
-                        expandBuffer()
-                        return false
+            when (val state = segment.getState(index)) {
+                // The cell is empty.
+                null, CellState.IN_BUFFER -> {
+                    // If a rendezvous must happen, the operation does not wait
+                    // until the cell stores a buffered element or a suspended
+                    // sender, poisoning the cell and restarting instead.
+                    // Otherwise, try to store the specified waiter in the cell.
+                    val s = sendersCounter.value
+                    if (r < s) {
+                        // The cell is already covered by sender, so a rendezvous must happen.
+                        // Unfortunately, the cell is empty, so the operation poisons it.
+                        if (segment.casState(index, state, CellState.POISONED)) {
+                            // When the cell becomes poisoned, expand the logical buffer and restart.
+                            expandBuffer()
+                            return false
+                        }
+                    } else {
+                        // The receiver should suspend.
+                        if (trySuspendReceiver(segment, index)) return true
                     }
                 }
                 // Buffered element => finish
-                state == CellState.BUFFERED -> {
+                CellState.BUFFERED -> {
                     segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
                     return true
                 }
                 // Cancelled sender => restart
-                state == CellState.INTERRUPTED_SEND -> return false
+                CellState.INTERRUPTED_SEND -> return false
                 // `expandBuffer()` is resuming the sender => wait
-                state == CellState.RESUMING_BY_EB -> continue
+                CellState.RESUMING_BY_EB -> continue
                 // Suspended sender in the cell => try to resume it
                 else -> {
                     // To synchronize with expandBuffer(), the algorithm first moves the cell to an
@@ -359,6 +374,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
             return true
         }
     }
+
+    /**
+        Returns `true` when the specified [send] should place its element to the working
+        cell without suspension.
+     */
+    private fun bufferOrRendezvousSend(curSenders: Long): Boolean =
+        curSenders < bufferEnd.value || curSenders < receiversCounter.value + capacity
 
     /**
        This method is responsible for updating the [bufferEnd] counter. It is called after
