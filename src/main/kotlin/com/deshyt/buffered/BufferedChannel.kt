@@ -97,7 +97,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                         }
                     } else {
                         // The sender should suspend.
-                        if (trySuspendSender(segment, index)) return true
+                        if (trySuspendRequest(segment, index, isSender = true)) return true
                     }
                 }
                 // The cell is in the logical buffer => try to buffer the element
@@ -181,7 +181,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                         }
                     } else {
                         // The receiver should suspend.
-                        if (trySuspendReceiver(segment, index)) return true
+                        if (trySuspendRequest(segment, index, isSender = false)) return true
                     }
                 }
                 // Buffered element => finish
