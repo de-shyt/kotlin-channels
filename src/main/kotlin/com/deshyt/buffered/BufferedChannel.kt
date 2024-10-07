@@ -9,7 +9,7 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class BufferedChannel<E>(capacity: Long) : Channel<E> {
+class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     /**
       The counters show the total amount of senders and receivers ever performed. They are
       incremented in the beginning of the corresponding operation, thus acquiring a unique
@@ -84,22 +84,30 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         index: Int
     ): Boolean {
         while (true) {
-            val state = segment.getState(index)
-            val b = bufferEnd.value
-            val r = receiversCounter.value
-            when {
-                // Empty and either the cell is in the buffer or a receiver is coming => buffer
-                state == null && (s < r || s < b) || state == CellState.IN_BUFFER -> {
+            when (val state = segment.getState(index)) {
+                // The cell is empty.
+                null -> {
+                    // If the cell is in the buffer or a receiver is coming, try to buffer
+                    // the element. Otherwise, try to place the sleeping sender in the cell.
+                    if (bufferOrRendezvousSend(s)) {
+                        // Move the cell state to `BUFFERED`.
+                        if (segment.casState(index, null, CellState.BUFFERED)) {
+                            // The element has been successfully buffered, finish.
+                            return true
+                        }
+                    } else {
+                        // The sender should suspend.
+                        if (trySuspendSender(segment, index)) return true
+                    }
+                }
+                // The cell is in the logical buffer => try to buffer the element
+                CellState.IN_BUFFER -> {
                     if (segment.casState(index, state, CellState.BUFFERED)) return true
                 }
-                // Empty, the cell is not in the buffer and no receiver is coming => suspend
-                state == null && s >= b && s >= r -> {
-                    if (trySuspendRequest(segment, index, isSender = true)) return true
-                }
                 // The cell was poisoned by a receiver => restart the sender
-                state == CellState.POISONED -> return false
+                CellState.POISONED -> return false
                 // Cancelled receiver => restart the sender
-                state == CellState.INTERRUPTED_RCV -> return false
+                CellState.INTERRUPTED_RCV -> return false
                 // Suspended receiver in the cell => try to resume it
                 else -> {
                     val receiver = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
@@ -155,29 +163,36 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         index: Int
     ): Boolean {
         while (true) {
-            val state = segment.getState(index)
-            val s = sendersCounter.value
-            when {
-                // The cell is empty and no sender is coming => suspend
-                (state == null || state == CellState.IN_BUFFER) && r >= s -> {
-                    if (trySuspendRequest(segment, index, isSender = false)) return true
-                }
-                // The cell is empty but a sender is coming => poison & restart
-                (state == null || state == CellState.IN_BUFFER) && r < s -> {
-                    if (segment.casState(index, state, CellState.POISONED)) {
-                        expandBuffer()
-                        return false
+            when (val state = segment.getState(index)) {
+                // The cell is empty.
+                null, CellState.IN_BUFFER -> {
+                    // If a rendezvous must happen, the operation does not wait
+                    // until the cell stores a buffered element or a suspended
+                    // sender, poisoning the cell and restarting instead.
+                    // Otherwise, try to store the specified waiter in the cell.
+                    val s = sendersCounter.value
+                    if (r < s) {
+                        // The cell is already covered by sender, so a rendezvous must happen.
+                        // Unfortunately, the cell is empty, so the operation poisons it.
+                        if (segment.casState(index, state, CellState.POISONED)) {
+                            // When the cell becomes poisoned, expand the logical buffer and restart.
+                            expandBuffer()
+                            return false
+                        }
+                    } else {
+                        // The receiver should suspend.
+                        if (trySuspendReceiver(segment, index)) return true
                     }
                 }
                 // Buffered element => finish
-                state == CellState.BUFFERED -> {
+                CellState.BUFFERED -> {
                     segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
                     return true
                 }
                 // Cancelled sender => restart
-                state == CellState.INTERRUPTED_SEND -> return false
+                CellState.INTERRUPTED_SEND -> return false
                 // `expandBuffer()` is resuming the sender => wait
-                state == CellState.RESUMING_BY_EB -> continue
+                CellState.RESUMING_BY_EB -> continue
                 // Suspended sender in the cell => try to resume it
                 else -> {
                     // To synchronize with expandBuffer(), the algorithm first moves the cell to an
@@ -188,19 +203,19 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                         val helpExpandBuffer = state is CoroutineEB
                         // Extract the sender's coroutine and try to resume it
                         val sender = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
-                        if (tryResumeRequest(sender)) {
+                        return if (tryResumeRequest(sender)) {
                             // The sender was resumed successfully. Update the cell state, expand the buffer and finish.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // finish, as the sender is resumed. Thus, no further action is required.
                             segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
-                            return true
+                            true
                         } else {
                             // The resumption has failed. Update the cell state and restart the receiver.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // skip this cell, so `expandBuffer()` should be called once again.
                             segment.onCancellation(index = index, isSender = true)
                             if (helpExpandBuffer) expandBuffer()
-                            return false
+                            false
                         }
                     }
                 }
@@ -209,12 +224,12 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     /**
-       This method suspends a request. If the suspended coroutine is successfully placed in the
-       cell, the method returns true. Otherwise, the coroutine is resumed and the method returns
-       false, thus restarting the request.
+        This method suspends a request. If the suspended coroutine is successfully placed in the
+        cell, the method returns true. Otherwise, the coroutine is resumed and the method returns
+        false, thus restarting the request.
 
-       If the request subject to suspension is a receiver, [expandBuffer] is invoked before the
-       coroutine falls asleep.
+        If the request subject to suspension is a receiver, [expandBuffer] is invoked before the
+        coroutine falls asleep.
      */
     private suspend fun trySuspendRequest(segment: ChannelSegment<E>, index: Int, isSender: Boolean): Boolean =
         suspendCancellableCoroutine { cont ->
@@ -232,15 +247,15 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
         }
 
     /**
-       This method resumes a suspended request. It returns true if the request was successfully
-       resumed and false otherwise.
+        This method resumes a suspended request. It returns true if the request was successfully
+        resumed and false otherwise.
      */
     private fun tryResumeRequest(cont: CancellableContinuation<Boolean>) = cont.tryResumeRequest(true)
 
     /**
-       Responsible for resuming a coroutine. The given [value] is the one that should be returned
-       in the suspension point. If the coroutine is successfully resumed, the method returns true,
-       otherwise it returns false.
+        Responsible for resuming a coroutine. The given [value] is the one that should be returned
+        in the suspension point. If the coroutine is successfully resumed, the method returns true,
+        otherwise it returns false.
      */
     @OptIn(InternalCoroutinesApi::class)
     private fun CancellableContinuation<Boolean>.tryResumeRequest(value: Boolean): Boolean {
@@ -354,6 +369,13 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
     }
 
     /**
+        Returns `true` when the specified [send] should place its element to the working
+        cell without suspension.
+     */
+    private fun bufferOrRendezvousSend(curSenders: Long): Boolean =
+        curSenders < bufferEnd.value || curSenders < receiversCounter.value + capacity
+
+    /**
        This method is responsible for updating the [bufferEnd] counter. It is called after
        `receive()` successfully performs its synchronization, either retrieving the first
        element, or storing its coroutine for suspension.
@@ -451,9 +473,9 @@ class BufferedChannel<E>(capacity: Long) : Channel<E> {
                 CellState.DONE_RCV -> return true
                 // The sender was interrupted => restart
                 CellState.INTERRUPTED_SEND -> return false
-                // The receiver was interrupted => finish
+                // The receiver was interrupted => finish, expandBuffer() was invoked before the receiver was suspended
                 CellState.INTERRUPTED_RCV -> return true
-                // Poisoned cell => finish, receive() is in charge
+                // Poisoned cell => finish, the receiver that poisoned the cell is in charge
                 CellState.POISONED -> return true
                 // A receiver is resuming the sender => wait in a spin loop until it changes
                 // the state to either `DONE_RCV` or `INTERRUPTED_SEND`
@@ -561,5 +583,9 @@ internal data class Coroutine(val cont: CancellableContinuation<Boolean>)
    cannot distinguish whether the coroutine stored in the cell is a suspended sender or receiver. Thus, the
    [expandBuffer] completion is delegated to a request of the opposite type which will come to the cell
    in the future.
+
+   If a suspended receiver is stored in the cell, the coming sender ignores the marker. Otherwise, it is a
+   suspended sender and a receiver comes and tries to resume it. In case of success, no further action is
+   needed. If the resumption fails, [expandBuffer] should be invoked.
  */
 internal data class CoroutineEB(val cont: CancellableContinuation<Boolean>)
