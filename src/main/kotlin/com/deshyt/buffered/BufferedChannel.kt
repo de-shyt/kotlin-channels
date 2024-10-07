@@ -590,5 +590,9 @@ internal data class Coroutine(val cont: CancellableContinuation<Boolean>)
    cannot distinguish whether the coroutine stored in the cell is a suspended sender or receiver. Thus, the
    [expandBuffer] completion is delegated to a request of the opposite type which will come to the cell
    in the future.
+
+   If a suspended receiver is stored in the cell, the coming sender ignores the marker. Otherwise, it is a
+   suspended sender and a receiver comes and tries to resume it. In case of success, no further action is
+   needed. If the resumption fails, [expandBuffer] should be invoked.
  */
 internal data class CoroutineEB(val cont: CancellableContinuation<Boolean>)
