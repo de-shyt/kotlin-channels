@@ -17,7 +17,6 @@ abstract class TestBase(open val sequentialSpecification: Class<*>) {
         .actorsAfter(actorsAfterAmount)
         .checkObstructionFreedom()
         .sequentialSpecification(sequentialSpecification)
-//        .logLevel(LoggingLevel.INFO)
         .check(this::class)
 
     @Test
@@ -33,7 +32,7 @@ abstract class TestBase(open val sequentialSpecification: Class<*>) {
 }
 
 // Configures the number of times the LinChecker will generate different concurrent scenarios and execute them
-val scenarios = 300
+val scenarios = 500
 
 // Defines the number of method calls that will be performed in each concurrent scenario.
 fun invokePerScenarioAmount(isStressTest: Boolean) = if (isStressTest) 25_000 else 12_000
