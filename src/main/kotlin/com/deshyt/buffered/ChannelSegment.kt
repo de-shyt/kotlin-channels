@@ -139,6 +139,15 @@ internal class ChannelSegment<E>(
         return curSegment
     }
 
+    internal fun findSpecifiedOrLast(destSegmentId: Long): ChannelSegment<E> {
+        // Start searching the required segment from the specified one.
+        var curSegment = this
+        while (curSegment.id < destSegmentId) {
+            curSegment = curSegment.getNext() ?: break
+        }
+        return curSegment
+    }
+
     /**
        This method is responsible for removing the segment from the segment list. First, it
        checks if all cells in the segment were interrupted. Then, in case it is true, it removes

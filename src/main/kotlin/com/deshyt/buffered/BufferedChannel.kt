@@ -390,8 +390,11 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             // the `send(e)` invocation that will work with this `b`-th cell will detect that the
             // cell is already a part of the buffer when comparing with the `bufferEnd` counter.
             if (b >= sendersCounter.value) {
-                // The cell is not covered by send() request. Increment the number of
-                // completed `expandBuffer()`-s and finish.
+                // The cell is not covered by send() request.
+                // Should `bufferEndSegment` be moved forward to avoid memory leaks?
+                if (segment.id < id && segment.getNext() != null)
+                    moveSegmentBufferEndToSpecifiedOrLast(id, segment)
+                // Increment the number of completed `expandBuffer()`-s and finish.
                 incCompletedExpandBufferAttempts()
                 return
             }
@@ -489,6 +492,21 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         completedExpandBuffers.addAndGet(nAttempts)
     }
 
+    private fun moveSegmentBufferEndToSpecifiedOrLast(id: Long, startFrom: ChannelSegment<E>) {
+        // Start searching the required segment from the specified one.
+        var segment = startFrom.findSpecifiedOrLast(id)
+        // Skip all removed segments and try to update `bufferEndSegment` to the first non-removed one.
+        // This part should succeed eventually, as the tail segment is never removed.
+        while (true) {
+            while (segment.isRemoved) {
+                segment = segment.getNext() ?: break
+            }
+            // Try to update `bufferEndSegment`. On failure, the found segment is already removed,
+            // so it should be skipped.
+            if (bufferEndSegment.moveForward(segment)) return
+        }
+    }
+
     /**
        Waits in a spin-loop until the [expandBuffer] call that should process the [globalIndex]-th
        cell is completed. Essentially, it waits until the numbers of started ([bufferEnd]) and
@@ -524,6 +542,9 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
            to the segment which cells were all used by the requests and not all of them were interrupted. */
         val prev = firstSegment.getPrev()
         check(prev == null || !prev.isRemoved) { "Channel $this: the `prev` link of the leftmost segment is not null." }
+
+        // Check that receiveSegment is before or equal to bufferEndSegment
+        check(receiveSegment.value.id <= bufferEndSegment.value.id) { "Channel $this: bufferEndSegment should not have lower id than receiveSegment." }
 
         var curSegment: ChannelSegment<E>? = firstSegment
         while (curSegment != null) {
@@ -561,7 +582,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        In this case, the leftmost segment is the first alive one or the tail.
      */
     private fun getFirstSegment(): ChannelSegment<E> {
-        var cur = listOf(receiveSegment.value, sendSegment.value).minBy { it.id }
+        var cur = listOf(receiveSegment.value, sendSegment.value, bufferEndSegment.value).minBy { it.id }
         while (cur.isRemoved && cur.getNext() != null) {
             cur = cur.getNext()!!
         }
