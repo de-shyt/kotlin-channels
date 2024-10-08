@@ -233,9 +233,6 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
      */
     private suspend fun trySuspendRequest(segment: ChannelSegment<E>, index: Int, isSender: Boolean): Boolean =
         suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation {
-                segment.onCancellation(index, isSender)
-            }
             if (!segment.casState(index, null, Coroutine(cont))) {
                 // The cell is occupied by the opposite request. Resume the coroutine.
                 cont.tryResumeRequest(false)
