@@ -33,10 +33,10 @@ abstract class TestBase(open val sequentialSpecification: Class<*>) {
 }
 
 // Configures the number of times the LinChecker will generate different concurrent scenarios and execute them
-val scenarios = 200
+val scenarios = 300
 
 // Defines the number of method calls that will be performed in each concurrent scenario.
-fun invokePerScenarioAmount(isStressTest: Boolean) = if (isStressTest) 25_000 else 10_000
+fun invokePerScenarioAmount(isStressTest: Boolean) = if (isStressTest) 25_000 else 12_000
 
 // Sets the number of threads that will be operating in parallel
 val threadsAmount = 3

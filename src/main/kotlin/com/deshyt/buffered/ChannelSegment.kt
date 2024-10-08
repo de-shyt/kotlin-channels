@@ -153,17 +153,15 @@ internal class ChannelSegment<E>(
             // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
             return
         }
-        // TODO remove segment physically
-//        // Find the closest non-removed segments on the left and on the right
-//        val prev = aliveSegmentLeft()
-//        val next = aliveSegmentRight()
-//
-//        // Update the links
-//        prev?.casNext(this, next)
-//        next.casPrev(this, prev)
-//
-//        next.tryRemoveSegment()
-//        prev?.tryRemoveSegment()
+        // Find the closest non-removed segments on the left and on the right
+        val prev = aliveSegmentLeft()
+        val next = aliveSegmentRight()
+        // Update the links
+        prev?.casNext(this, next)
+        next.casPrev(this, prev)
+
+        next.tryRemoveSegment()
+        prev?.tryRemoveSegment()
     }
 
     /**

@@ -343,7 +343,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     }
 
     /**
-       This method helps moving the `AtomicRef` pointer forward.
+       This method helps to move the `AtomicRef` pointer forward.
        If the pointer is being moved to the segment which is logically removed, the method
        returns false, thus forcing [findSegmentAndMoveForward] method to restart.
      */
@@ -520,10 +520,10 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     override fun checkSegmentStructureInvariants() {
         val firstSegment = getFirstSegment()
 
-        /* TODO Check that the `prev` link of the leftmost segment is correct. The link can be non-null, if it points
-                to the segment which cells were all used by the requests and not all of them were interrupted. */
-//        val prev = firstSegment.getPrev()
-//        check(prev == null || !prev.isRemoved()) { "Channel $this: the `prev` link of the leftmost segment is not null." }
+        /* Check that the `prev` link of the leftmost segment is correct. The link can be non-null, if it points
+           to the segment which cells were all used by the requests and not all of them were interrupted. */
+        val prev = firstSegment.getPrev()
+        check(prev == null || !prev.isRemoved) { "Channel $this: the `prev` link of the leftmost segment is not null." }
 
         var curSegment: ChannelSegment<E>? = firstSegment
         while (curSegment != null) {
@@ -535,9 +535,9 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                 ) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
             }
 
-            // TODO Check that the removed segments are not reachable from the list.
+            // Check that the removed segments are not reachable from the list.
             // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
-//            check(curSegment.isAlive() || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
+            check(!curSegment.isRemoved || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
 
             // Check that the segment's state is correct
             curSegment.validate()
