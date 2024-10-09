@@ -274,7 +274,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         In case the requested segment is already removed, the method returns `null`.
      */
     private fun findSegmentSend(id: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
-        val segment = sendSegment.findSegmentAndMoveForward(id, startFrom)
+        val segment = sendSegment.findSegmentAndMoveForward(id, startFrom, ChannelPointerMask.SEND_SEGMENT)
         return if (segment.id > id) {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
@@ -297,7 +297,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         In case the requested segment is already removed, the method returns `null`.
      */
     private fun findSegmentReceive(id: Long, startFrom: ChannelSegment<E>): ChannelSegment<E>? {
-        val segment = receiveSegment.findSegmentAndMoveForward(id, startFrom)
+        val segment = receiveSegment.findSegmentAndMoveForward(id, startFrom, ChannelPointerMask.RECEIVE_SEGMENT)
         return if (segment.id > id) {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
@@ -333,12 +333,13 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     @Suppress("NOTHING_TO_INLINE")
     internal inline fun <E> AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
         id: Long,
-        startFrom: ChannelSegment<E>
+        startFrom: ChannelSegment<E>,
+        pointerMask: ChannelPointerMask
     ): ChannelSegment<E> {
         while (true) {
             val dest = startFrom.findSegment(id)
             // Try to update `value` and restart if the found segment is logically removed
-            if (moveForward(dest)) return dest
+            if (moveForward(dest, pointerMask)) return dest
         }
     }
 
@@ -348,7 +349,10 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        returns false, thus forcing [findSegmentAndMoveForward] method to restart.
      */
     @Suppress("NOTHING_TO_INLINE")
-    internal inline fun <E> AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean = loop { cur ->
+    internal inline fun <E> AtomicRef<ChannelSegment<E>>.moveForward(
+        to: ChannelSegment<E>,
+        pointerMask: ChannelPointerMask
+    ): Boolean = loop { cur ->
         if (cur.id >= to.id) {
             // No need to update the pointer, it was already updated by another request.
             return true
@@ -359,8 +363,14 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             return false
         }
         if (compareAndSet(cur, to)) {
-            // The segment was successfully moved.
-            cur.tryRemoveSegment()
+            // The pointer was successfully moved.
+            // Update the old segment's bit mask. Has the segment been processed by all channel pointers and,
+            // thus, subject to a physical removal?
+            if (!cur.updateMask(pointerMask)) {
+                // The old segment's bit mask was updated, but the segment was not removed physically.
+                // Is the segment still subject to a physical removal?
+                cur.tryRemoveSegment()
+            }
             return true
         }
     }
@@ -424,7 +434,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
 
     private fun findSegmentBufferEnd(id: Long, startFrom: ChannelSegment<E>, currentBufferEndCounter: Long)
     : ChannelSegment<E>? {
-        val segment = bufferEndSegment.findSegmentAndMoveForward(id, startFrom)
+        val segment = bufferEndSegment.findSegmentAndMoveForward(id, startFrom, ChannelPointerMask.BUFFER_END_SEGMENT)
         return if (segment.id > id) {
             // The required segment has been removed; `segment` is the first
             // segment with `id` not lower than the required one.
@@ -503,7 +513,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             }
             // Try to update `bufferEndSegment`. On failure, the found segment is already removed,
             // so it should be skipped.
-            if (bufferEndSegment.moveForward(segment)) return
+            if (bufferEndSegment.moveForward(segment, ChannelPointerMask.BUFFER_END_SEGMENT)) return
         }
     }
 
@@ -538,10 +548,8 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     override fun checkSegmentStructureInvariants() {
         val firstSegment = getFirstSegment()
 
-        /* Check that the `prev` link of the leftmost segment is correct. The link can be non-null, if it points
-           to the segment which cells were all used by the requests and not all of them were interrupted. */
-        val prev = firstSegment.getPrev()
-        check(prev == null || !prev.isRemoved) { "Channel $this: the `prev` link of the leftmost segment is not null." }
+        // Check that the `prev` link of the leftmost segment is null
+        check(firstSegment.getPrev() == null) { "Channel $this: the `prev` link of the leftmost segment is not null." }
 
         // Check that receiveSegment is before or equal to bufferEndSegment
         check(receiveSegment.value.id <= bufferEndSegment.value.id) { "Channel $this: bufferEndSegment should not have lower id than receiveSegment." }

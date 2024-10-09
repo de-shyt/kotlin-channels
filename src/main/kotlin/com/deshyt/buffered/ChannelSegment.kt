@@ -3,6 +3,7 @@ package com.deshyt.buffered
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.atomicArrayOfNulls
+import kotlinx.atomicfu.getAndUpdate
 
 /**
  * The channel is represented as a list of segments, which simulates an infinite array.
@@ -32,6 +33,41 @@ internal class ChannelSegment<E>(
        Each slot consists of 2 registers: a state and an element.
     */
     private val data = atomicArrayOfNulls<Any?>(SEGMENT_SIZE * 2)
+
+    /**
+       This bit mask indicates which channel pointers have already processed this segment. When the
+       value is `0b111`, the segment can be removed physically, even though it is not marked as
+       logically removed.
+     */
+    private val pointersMask = atomic(0b000)
+    internal val mask get() = pointersMask.value
+
+    /**
+       This method is responsible for updating the segment's bit mask. In case the segment has been
+       processed by all channel pointers, the method removes the segment physically by setting
+       `this.next.prev` link to `null`. If the link was updated, the method returns true, otherwise
+       it returns false.
+
+       It is guaranteed that `this.next` is not null, since all channel pointers have processed the
+       segment and moved forward on the segment list. Removing the processed segment is necessary,
+       it helps to avoid memory leaks.
+     */
+    fun updateMask(channelPointer: ChannelPointerMask): Boolean {
+        check(mask and channelPointer.bitMask == 0)
+            { "Segment $this: the segment has already been processed by $channelPointer, trying to update the segment's mask for the second time." }
+        // Update the segment's bit mask
+        pointersMask.getAndUpdate { old -> old or channelPointer.bitMask }
+        // Has the segment been processed by all channel pointers?
+        return if (mask == ChannelPointerMask.TOTAL.bitMask) {
+            // All the channel pointers have moved forward and the segment is no longer
+            // needed in the segment list. Remove it physically to avoid memory leaks.
+            this.next.value?.casPrev(this, null) ?: error("Segment $this: the segment has been processed by all channel pointers, but the `next` link is null.")
+            true
+        } else {
+            // The segment is not processed by all channel pointers. Finish the operation.
+            false
+        }
+    }
 
     // ######################################
     // # Manipulation with the State Fields #
@@ -261,3 +297,15 @@ enum class CellState {
 }
 
 const val SEGMENT_SIZE = 2
+
+/**
+   These masks are used in a channel segment to define whether the segment has been processed by a
+   particular pointer ([BufferedChannel.sendSegment], [BufferedChannel.receiveSegment] or
+   [BufferedChannel.bufferEndSegment]).
+ */
+enum class ChannelPointerMask(val bitMask: Int) {
+    SEND_SEGMENT(0b100),     // Bitmask for sendSegment
+    RECEIVE_SEGMENT(0b010),  // Bitmask for receiveSegment
+    BUFFER_END_SEGMENT(0b001), // Bitmask for bufferEndSegment
+    TOTAL(0b111)
+}
