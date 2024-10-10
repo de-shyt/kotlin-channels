@@ -25,7 +25,7 @@ internal class ChannelSegment<E>(
        physically removed.
     */
     private val interruptedCellsCounter = atomic(0)
-    private val interruptedCells: Int get() = interruptedCellsCounter.value
+    internal val interruptedCells: Int get() = interruptedCellsCounter.value
 
     /**
        Represents an array of slots, the amount of slots is equal to [SEGMENT_SIZE].
@@ -44,9 +44,6 @@ internal class ChannelSegment<E>(
     internal fun getAndSetState(index: Int, value: Any) = data[index * 2 + 1].getAndSet(value)
 
     internal fun casState(index: Int, from: Any?, to: Any) = data[index * 2 + 1].compareAndSet(from, to)
-
-    internal fun isStateInterrupted(index: Int) =
-        getState(index) == CellState.INTERRUPTED_SEND || getState(index) == CellState.INTERRUPTED_RCV
 
     // ########################################
     // # Manipulation with the Element Fields #
@@ -205,40 +202,33 @@ internal class ChannelSegment<E>(
 
     internal fun validate() {
         var interruptedCells = 0
-
         for (index in 0 until SEGMENT_SIZE) {
             // Check that there are no memory leaks
-            cellValidate(index)
-            // Count the actual amount of interrupted cells
-            if (isStateInterrupted(index)) interruptedCells++
+            when (val state = getState(index)) {
+                null, CellState.IN_BUFFER -> {
+                    // The cell is not yet used by any request, check that it remained clean.
+                    check(getElement(index) == null)
+                }
+                CellState.BUFFERED -> {}  // The cell stores a buffered element.
+                is Coroutine, is CoroutineEB -> {}  // The cell stores a suspended request.
+                CellState.DONE_RCV, CellState.POISONED -> {
+                    // The cell was processed or poisoned, check that it was cleaned.
+                    check(getElement(index) == null)
+                }
+                CellState.INTERRUPTED_RCV, CellState.INTERRUPTED_SEND -> {
+                    // The cell stored an interrupted request, check that it was cleaned.
+                    check(getElement(index) == null)
+                    interruptedCells++
+                }
+                CellState.RESUMING_BY_RCV, CellState.RESUMING_BY_EB -> error("Segment $this: state is $state, but should be BUFFERED, DONE_RCV or INTERRUPTED_SEND.")
+                else -> error("Unexpected state $state in $this.")
+            }
         }
-
         // Check that the value of the segment's counter is correct
         check(interruptedCells == this.interruptedCells) { "Segment $this: the segment's counter (${this.interruptedCells}) and the amount of interrupted cells ($interruptedCells) are different." }
-
-        // Check that the segment's state is correct
-        when (interruptedCells.compareTo(SEGMENT_SIZE)) {
-            -1 -> check(!isRemoved) { "Segment $this: there are non-interrupted cells, but the segment is logically removed." }
-            0 -> {
-                check(isRemoved) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
-                // Check that the state of each cell is INTERRUPTED
-                for (index in 0 until SEGMENT_SIZE) {
-                    check(isStateInterrupted(index)) { "Segment $this: the segment is logically removed, but the cell $index is not marked INTERRUPTED." }
-                }
-            }
-            1 -> error("Segment $this: the amount of interrupted cells ($interruptedCells) is greater than SEGMENT_SIZE ($SEGMENT_SIZE).")
-        }
-    }
-
-    private fun cellValidate(index: Int) {
-        when(val state = getState(index)) {
-            CellState.IN_BUFFER, CellState.DONE_RCV, CellState.POISONED, CellState.INTERRUPTED_RCV, CellState.INTERRUPTED_SEND -> {
-                check(getElement(index) == null) { "Segment $this: state is $state, but the element is not null in cell $index." }
-            }
-            null, CellState.BUFFERED -> {}
-            is Coroutine, is CoroutineEB -> {}
-            CellState.RESUMING_BY_RCV, CellState.RESUMING_BY_EB -> error("Segment $this: state is $state, but should be BUFFERED or INTERRUPTED_SEND.")
-            else -> error("Unexpected state $state in $this.")
+        // Check that, in case all cells were interrupted, the segment is logically removed.
+        if (interruptedCells == SEGMENT_SIZE) {
+            check(isRemoved) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
         }
     }
 }

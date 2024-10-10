@@ -3,7 +3,6 @@ package com.deshyt
 import org.jetbrains.kotlinx.lincheck.annotations.Operation
 import org.jetbrains.kotlinx.lincheck.annotations.Param
 import org.jetbrains.kotlinx.lincheck.annotations.Validate
-import org.jetbrains.kotlinx.lincheck.execution.ExecutionScenario
 import org.jetbrains.kotlinx.lincheck.paramgen.IntGen
 import kotlin.coroutines.cancellation.CancellationException
 
