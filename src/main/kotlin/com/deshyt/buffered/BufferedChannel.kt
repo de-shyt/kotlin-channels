@@ -111,15 +111,15 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                 // Suspended receiver in the cell => try to resume it
                 else -> {
                     val receiver = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
-                    if (tryResumeRequest(receiver)) {
+                    return if (tryResumeRequest(receiver)) {
                         segment.setState(index, CellState.DONE_RCV)
-                        return true
+                        true
                     } else {
                         // The resumption has failed, since the receiver was cancelled.
                         // Clean the cell and wait until `expandBuffer()`-s invoked on the cells
                         // before the current one finish.
                         segment.onCancellation(index = index, isSender = false)
-                        return false
+                        false
                     }
                 }
             }
@@ -546,55 +546,51 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     // ###################################
 
     override fun checkSegmentStructureInvariants() {
-        val firstSegment = getFirstSegment()
+        val firstSegment = listOf(receiveSegment.value, sendSegment.value, bufferEndSegment.value).minBy { it.id }
 
-        // Check that the `prev` link of the leftmost segment is null
-        check(firstSegment.getPrev() == null) { "Channel $this: the `prev` link of the leftmost segment is not null." }
+        // Check that the `prev` link of the leftmost segment is correct.
+        check(firstSegment.getPrev() == null) {
+            "Channel $this: the `prev` link of the leftmost segment is not null."
+        }
 
-        // Check that receiveSegment is before or equal to bufferEndSegment
-        check(receiveSegment.value.id <= bufferEndSegment.value.id) { "Channel $this: bufferEndSegment should not have lower id than receiveSegment." }
+        // Check that `receiveSegment` is before or equal to `bufferEndSegment`
+        check(receiveSegment.value.id <= bufferEndSegment.value.id) {
+            "Channel $this: bufferEndSegment should not have lower id than receiveSegment."
+        }
 
-        var curSegment: ChannelSegment<E>? = firstSegment
-        while (curSegment != null) {
-            // Check that the segment's `prev` link is correct
-            if (curSegment != firstSegment) {
-                check(curSegment.getPrev() != null) { "Channel $this: `prev` link is null, but the segment $curSegment is not the leftmost one." }
-                check(
-                    curSegment.getPrev()!!.getNext() == curSegment
-                ) { "Channel $this: `prev` points to the wrong segment for $curSegment." }
+        var curSegment: ChannelSegment<E> = firstSegment
+
+        // The loop stops when the tail is reached. The tail can be marked as logically removed, but it
+        // cannot be removed physically. Otherwise, the uniqueness of the segment id is not guaranteed.
+        while (curSegment.getNext() != null) {
+            // Check that the removed segments are not reachable from the list. The
+            // segment can be logically removed and reachable if it is bounded with
+            // a channel pointer.
+            if (curSegment.isRemoved) {
+                // The segment is marked as logically removed. Check that it is bounded with at least
+                // one of the channel pointers.
+                check(curSegment == sendSegment.value || curSegment == receiveSegment.value || curSegment == bufferEndSegment.value) {
+                    "Channel $this: logically removed segment is reachable from the segment list."
+                }
+                // Check that all cells of the logically removed segment were interrupted.
+                check(curSegment.interruptedCells == SEGMENT_SIZE) {
+                    "The segment is logically removed, but amount of interrupted cells (${curSegment.interruptedCells}) is not equal to SEGMENT_SIZE ($SEGMENT_SIZE)."
+                }
+            } else {
+                // The segment is not marked as logically removed.
+                // Check that the segment list remains double-linked.
+                check(curSegment.getNext()!!.getPrev() == curSegment) {
+                    "Channel $this: the `segment.next.prev == segment` invariant is violated."
+                }
             }
-
-            // Check that the removed segments are not reachable from the list.
-            // The tail segment cannot be removed physically. Otherwise, uniqueness of segment id is not guaranteed.
-            check(!curSegment.isRemoved || curSegment.getNext() == null) { "Channel $this: the segment $curSegment is marked removed, but is reachable from the segment list." }
-
             // Check that the segment's state is correct
             curSegment.validate()
-
-            curSegment = curSegment.getNext()
+            // Process the next segment
+            curSegment = curSegment.getNext()!!
         }
-    }
 
-    /*
-       This method returns the leftmost segment in the segment list.
-       It handles the situation when one pointer was moved further, the other pointer remained
-       the same and segments between the pointers were removed:
-
-                         REMOVED             REMOVED
-                        ┌───────┐ ────────► ┌───────┐ ────────► ┌───────┐
-                        └───────┘ null◄──── └───────┘ null◄──── └───────┘
-                            ▲                                       ▲
-                            │                                       │
-                         `receiveSegment`                        `sendSegment`
-
-       In this case, the leftmost segment is the first alive one or the tail.
-     */
-    private fun getFirstSegment(): ChannelSegment<E> {
-        var cur = listOf(receiveSegment.value, sendSegment.value, bufferEndSegment.value).minBy { it.id }
-        while (cur.isRemoved && cur.getNext() != null) {
-            cur = cur.getNext()!!
-        }
-        return cur
+        // Check that the state of the tail segment is correct
+        curSegment.validate()
     }
 }
 
