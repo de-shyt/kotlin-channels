@@ -331,7 +331,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        to it, the segment is returned by the method.
      */
     @Suppress("NOTHING_TO_INLINE")
-    internal inline fun <E> AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
+    internal inline fun AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
         id: Long,
         startFrom: ChannelSegment<E>
     ): ChannelSegment<E> {
@@ -348,7 +348,7 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        returns false, thus forcing [findSegmentAndMoveForward] method to restart.
      */
     @Suppress("NOTHING_TO_INLINE")
-    internal inline fun <E> AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean = loop { cur ->
+    internal inline fun AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean = loop { cur ->
         if (cur.id >= to.id) {
             // No need to update the pointer, it was already updated by another request.
             return true

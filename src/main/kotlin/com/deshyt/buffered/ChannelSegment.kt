@@ -162,7 +162,7 @@ internal class ChannelSegment<E>(
         // Find the closest non-removed segments on the left and on the right
         val prev = aliveSegmentLeft()
         val next = aliveSegmentRight()
-        // Update the links
+        // Update the neighbors' links
         prev?.casNext(this, next)
         next.casPrev(this, prev)
 
