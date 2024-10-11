@@ -70,6 +70,8 @@ internal class ChannelSegment<E>(
 
     private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
 
+    private fun setPrev(value: ChannelSegment<E>?) { prev.lazySet(value) }
+
     // ########################
     // # Cancellation Support #
     // ########################
@@ -165,9 +167,20 @@ internal class ChannelSegment<E>(
         // Update the neighbors' links
         prev?.casNext(this, next)
         next.casPrev(this, prev)
-
+        // Update the `prev` link of the current segment to avoid memory leaks
+        this.setPrev(null)
+        // Initiate the removal process on the neighbors to solve races
         next.tryRemoveSegment()
         prev?.tryRemoveSegment()
+    }
+
+    /**
+       This method is used to remove segments which are already processed by the channel pointers,
+       but not marked as logically removed and, as a result, reachable from the segment list.
+     */
+    internal fun removeWhenProcessed() {
+        // Set `this.next.prev` link to null
+        next.value?.setPrev(null)
     }
 
     /**
