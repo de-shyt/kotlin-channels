@@ -362,10 +362,10 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             // The segment was successfully moved.
             // Has the segment been processed by all channel pointers?
             removeIfProcessed(cur)
-            // Is the segment logically removed?
-            cur.tryRemoveSegment()
             return true
         }
+        // Has the segment been processed by all channel pointers?
+        removeIfProcessed(cur)
     }
 
     /**
@@ -538,8 +538,11 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        This method removes the segment physically if it has been processed by all channel pointers.
      */
     private fun removeIfProcessed(segment: ChannelSegment<E>) {
-        if (segment.id < sendSegment.value.id && segment.id < receiveSegment.value.id && segment.id < bufferEndSegment.value.id)
-            segment.removeWhenProcessed()
+        if (segment.id < sendSegment.value.id && segment.id < receiveSegment.value.id && segment.id < bufferEndSegment.value.id) {
+            val next = segment.getNext() ?: return
+            next.cleanPrev()
+            removeIfProcessed(next)
+        }
     }
 
     // ###################################

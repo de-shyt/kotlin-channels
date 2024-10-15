@@ -8,8 +8,8 @@ import kotlinx.atomicfu.atomicArrayOfNulls
  * The channel is represented as a list of segments, which simulates an infinite array.
  * Each segment has its own [id], which increases from the beginning.
  *
- * The structure of the segment list is manipulated inside the methods [findSegment]
- * and [tryRemoveSegment] and cannot be changed from the outside.
+ * The structure of the segment list is manipulated via the methods [findSegment],
+ * [tryRemoveSegment] and [BufferedChannel.removeIfProcessed].
  */
 internal class ChannelSegment<E>(
     private val channel: BufferedChannel<E>,
@@ -70,7 +70,7 @@ internal class ChannelSegment<E>(
 
     private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
 
-    private fun setPrev(value: ChannelSegment<E>?) { prev.lazySet(value) }
+    internal fun cleanPrev() { prev.lazySet(null) }
 
     // ########################
     // # Cancellation Support #
@@ -167,20 +167,11 @@ internal class ChannelSegment<E>(
         // Update the neighbors' links
         prev?.casNext(this, next)
         next.casPrev(this, prev)
-        // Update the `prev` link of the current segment to avoid memory leaks
-        this.setPrev(null)
-        // Initiate the removal process on the neighbors to solve races
+        // Set the `prev` link of the current segment to `null` to avoid memory leaks
+        this.cleanPrev()
+        // Initiate the removal process on the neighbors to resolve data races
         next.tryRemoveSegment()
         prev?.tryRemoveSegment()
-    }
-
-    /**
-       This method is used to remove segments which are already processed by the channel pointers,
-       but not marked as logically removed and, as a result, reachable from the segment list.
-     */
-    internal fun removeWhenProcessed() {
-        // Set `this.next.prev` link to null
-        next.value?.setPrev(null)
     }
 
     /**
