@@ -360,7 +360,6 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
         if (compareAndSet(cur, to)) {
             // The segment was successfully moved.
-            cur.tryRemoveSegment()
             return true
         }
     }
