@@ -12,7 +12,7 @@ import kotlin.coroutines.cancellation.CancellationException
 )
 abstract class ChannelTestBase(
     protected val c: Channel<Int>,
-    override val sequentialSpecification: Class<*>,
+    override val sequentialSpecification: Class<*>
 ) : TestBase(sequentialSpecification) {
 
     @Operation(allowExtraSuspension = true, blocking = true)
