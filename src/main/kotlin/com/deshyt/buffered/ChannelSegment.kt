@@ -7,6 +7,9 @@ import kotlinx.atomicfu.atomicArrayOfNulls
 /**
  * The channel is represented as a list of segments, which simulates an infinite array.
  * Each segment has its own [id], which increases from the beginning.
+ *
+ * The structure of the segment list is manipulated via the methods [findSegment],
+ * [tryRemoveSegment] and [BufferedChannel.removeIfProcessed].
  */
 internal class ChannelSegment<E>(
     private val channel: BufferedChannel<E>,
@@ -66,6 +69,8 @@ internal class ChannelSegment<E>(
     internal fun getPrev(): ChannelSegment<E>? = prev.value
 
     private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
+
+    internal fun cleanPrev() { prev.lazySet(null) }
 
     // ########################
     // # Cancellation Support #
@@ -162,6 +167,8 @@ internal class ChannelSegment<E>(
         // Update the neighbors' links
         prev?.casNext(this, next)
         next.casPrev(this, prev)
+        // Set the `prev` link of the current segment to `null` to avoid memory leaks
+        this.cleanPrev()
         // Initiate the removal process on the neighbors to resolve data races
         next.tryRemoveSegment()
         prev?.tryRemoveSegment()

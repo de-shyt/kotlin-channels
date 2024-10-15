@@ -360,8 +360,12 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
         if (compareAndSet(cur, to)) {
             // The segment was successfully moved.
+            // Has the segment been processed by all channel pointers?
+            removeIfProcessed(cur)
             return true
         }
+        // Has the segment been processed by all channel pointers?
+        removeIfProcessed(cur)
     }
 
     /**
@@ -530,6 +534,17 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
     }
 
+    /**
+       This method removes the segment physically if it has been processed by all channel pointers.
+     */
+    private fun removeIfProcessed(segment: ChannelSegment<E>) {
+        if (segment.id < sendSegment.value.id && segment.id < receiveSegment.value.id && segment.id < bufferEndSegment.value.id) {
+            val next = segment.getNext() ?: return
+            next.cleanPrev()
+            removeIfProcessed(next)
+        }
+    }
+
     // ###################################
     // # Validation of the channel state #
     // ###################################
@@ -537,10 +552,10 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     override fun checkSegmentStructureInvariants() {
         val firstSegment = listOf(receiveSegment.value, sendSegment.value, bufferEndSegment.value).minBy { it.id }
 
-        // TODO Check that the `prev` link of the leftmost segment is correct.
-//        check(firstSegment.getPrev() == null) {
-//            "Channel $this: the `prev` link of the leftmost segment is not null."
-//        }
+        // Check that the `prev` link of the leftmost segment is correct.
+        check(firstSegment.getPrev() == null) {
+            "Channel $this: the `prev` link of the leftmost segment is not null."
+        }
 
         // Check that `receiveSegment` is before or equal to `bufferEndSegment`
         check(receiveSegment.value.id <= bufferEndSegment.value.id) {
