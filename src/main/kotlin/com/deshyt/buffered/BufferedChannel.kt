@@ -535,13 +535,24 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     }
 
     /**
-       This method removes the segment physically if it has been processed by all channel pointers.
+       This method cleans the `prev` link of the segment if it has been processed by both
+       [sendSegment] and [receiveSegment] channel pointers.
      */
     private fun removeIfProcessed(segment: ChannelSegment<E>) {
-        if (segment.id < sendSegment.value.id && segment.id < receiveSegment.value.id && segment.id < bufferEndSegment.value.id) {
+        if (!(segment.id < sendSegment.value.id && segment.id < receiveSegment.value.id)) {
+            // The segment is not processed by both
+            return
+        }
+        while (true) {
             val next = segment.getNext() ?: return
+            if (next.isRemoved) {
+                // The current `next` segment is logically removed. Wait until its
+                // removal process finish.
+                continue
+            }
+            // The next non-removed segment is found. Clean its `prev` link and finish.
             next.cleanPrev()
-            removeIfProcessed(next)
+            return
         }
     }
 
@@ -605,13 +616,13 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
 internal data class Coroutine(val cont: CancellableContinuation<Boolean>)
 
 /**
-   A waiter that stores a suspended coroutine with the `EB` marker. The marker is added when [expandBuffer]
+   A waiter that stores a suspended coroutine with the `EB` marker. The marker is added when [BufferedChannel.expandBuffer]
    cannot distinguish whether the coroutine stored in the cell is a suspended sender or receiver. Thus, the
-   [expandBuffer] completion is delegated to a request of the opposite type which will come to the cell
+   [BufferedChannel.expandBuffer] completion is delegated to a request of the opposite type which will come to the cell
    in the future.
 
    If a suspended receiver is stored in the cell, the coming sender ignores the marker. Otherwise, it is a
    suspended sender and a receiver comes and tries to resume it. In case of success, no further action is
-   needed. If the resumption fails, [expandBuffer] should be invoked.
+   needed. If the resumption fails, [BufferedChannel.expandBuffer] should be invoked.
  */
 internal data class CoroutineEB(val cont: CancellableContinuation<Boolean>)
