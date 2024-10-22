@@ -539,22 +539,33 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        [sendSegment] and [receiveSegment] channel pointers.
      */
     private fun removeIfProcessed(segment: ChannelSegment<E>) {
-        if (!(segment.id < sendSegment.value.id && segment.id < receiveSegment.value.id)) {
-            // The segment is not processed by both
+        if (!segment.isProcessed) {
+            // The segment is not processed by both `sendSegment` and `receiveSegment` pointers.
             return
         }
-        while (true) {
-            val next = segment.getNext() ?: return
-            if (next.isRemoved) {
-                // The current `next` segment is logically removed. Wait until its
-                // removal process finish.
-                continue
-            }
-            // The next non-removed segment is found. Clean its `prev` link and finish.
-            next.cleanPrev()
-            return
+        // The segment is processed, which means the beginning of the segment list should be
+        // updated. Iterate over the segment list and set `prev` links to `null`, until the
+        // first alive non-processed segment is found. This segment becomes the leftmost one
+        // in the segment list.
+        var cur = segment.getNext() ?: return
+        while (cur.isProcessed || cur.isRemoved) {
+            // The current segment is logically removed or processed, which means it should be
+            // unreachable from the segment list. Set its `prev` link to `null`.
+            cur.cleanPrev()
+            cur = cur.getNext() ?: return
         }
+        // The first alive segment is found. Now it is the leftmost segment in the segment list.
+        // Clean its `prev` link and finish.
+        cur.cleanPrev()
     }
+
+    /**
+       This value shows if the segment was processed by both [sendSegment] and [receiveSegment]
+       pointers. In case of true, it means the segment can be removed from the segment list to
+       avoid memory leaks.
+     */
+    private val ChannelSegment<E>.isProcessed: Boolean get() =
+        id < sendSegment.value.id && id < receiveSegment.value.id
 
     // ###################################
     // # Validation of the channel state #
