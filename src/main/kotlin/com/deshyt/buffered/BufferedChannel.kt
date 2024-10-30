@@ -39,6 +39,9 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
     private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
+    internal val sendSegmentId: Long get() = sendSegment.value.id
+    internal val receiveSegmentId: Long get() = receiveSegment.value.id
+
     init {
         require(capacity > 0) { "Invalid capacity ($capacity) for a buffered channel, should be >= 1." }
         val firstSegment = ChannelSegment(id = 0, prevSegment = null, channel = this)
@@ -86,9 +89,9 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                 }
                 // The cell was poisoned or stores an interrupted receiver => restart
                 RESULT_FAILED -> {
-                    // If the segment was reached by `receiveSegment` pointer, clean its
-                    // `prev` link to avoid memory leaks.
-                    if (s < receiversCounter.value) segment.cleanPrev()
+                    // The segment was reached by both `send(e)` and `receive()` operations,
+                    // clean its `prev` link to avoid memory leaks.
+                    segment.cleanPrev()
                     // Clean the current cell and restart.
                     segment.cleanElement(index)
                     continue

@@ -3,6 +3,7 @@ package com.deshyt.buffered
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.atomicArrayOfNulls
+import kotlinx.atomicfu.update
 
 /**
  * The channel is represented as a list of segments, which simulates an infinite array.
@@ -139,6 +140,7 @@ internal class ChannelSegment<E>(
                 // The tail was updated. Check if the old tail should be removed.
                 curSegment.tryRemoveSegment()
             }
+            if (curSegment.id <= channel.sendSegmentId && curSegment.id <= channel.receiveSegmentId) curSegment.cleanPrev()
             curSegment = curSegment.getNext()!!
         }
         return curSegment
@@ -174,13 +176,12 @@ internal class ChannelSegment<E>(
             val prev = aliveSegmentLeft
             val next = aliveSegmentRight
             // Update the neighbors' links
-            prev?.casNext(this, next)
-            next.casPrev(this, prev)
+            next.prev.update { if (it == null) null else prev }
+            if (prev != null) prev.next.value = next
             // Check that prev and next are still alive
             if (next.isRemoved && !next.isTail) continue
             if (prev != null && prev.isRemoved) continue
             // This segment is physically removed.
-            this.cleanPrev()
             return
         }
     }
