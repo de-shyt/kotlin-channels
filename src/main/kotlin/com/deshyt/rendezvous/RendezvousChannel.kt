@@ -9,7 +9,7 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class RendezvousChannel<E> : Channel<E> {
+internal class RendezvousChannel<E> : Channel<E> {
     /**
        The counters show the total amount of senders and receivers ever performed. They are
        incremented in the beginning of the corresponding operation, thus acquiring a unique
