@@ -3,6 +3,7 @@ package com.deshyt.buffered
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.atomicArrayOfNulls
+import kotlinx.atomicfu.update
 
 /**
  * The channel is represented as a list of segments, which simulates an infinite array.
@@ -13,7 +14,7 @@ import kotlinx.atomicfu.atomicArrayOfNulls
  */
 internal class ChannelSegment<E>(
     private val channel: BufferedChannel<E>,
-    val id: Long,
+    internal val id: Long,
     prevSegment: ChannelSegment<E>?,
 ) {
     private val next: AtomicRef<ChannelSegment<E>?> = atomic(null)
@@ -122,6 +123,12 @@ internal class ChannelSegment<E>(
     internal val isRemoved: Boolean get() = interruptedCells == SEGMENT_SIZE
 
     /**
+       This value shows that the segment is the last one in the segment list. The tail cannot
+       be removed physically, until a new segment is added to the list.
+     */
+    internal val isTail: Boolean get() = getNext() == null
+
+    /**
        This method looks for a segment with id equal to or greater than the requested [destSegmentId].
        If there are segments which are logically removed, they are skipped.
      */
@@ -152,49 +159,51 @@ internal class ChannelSegment<E>(
        checks if all cells in the segment were interrupted. Then, in case it is true, it removes
        the segment physically by updating the neighbours' [prev] and [next] links.
      */
-    internal fun tryRemoveSegment() {
+    private fun tryRemoveSegment() {
         if (!isRemoved) {
             // There are non-interrupted cells, no need to remove the segment.
             return
         }
-        if (getNext() == null) {
-            // The tail segment cannot be removed, otherwise it is not guaranteed that each segment has a unique id.
+        if (isTail) {
+            // The tail segment cannot be physically removed, otherwise it is not guaranteed that
+            // each segment has a unique id. Instead, it is removed when a new segment is added and
+            // this segment is not the tail one anymore.
             return
         }
-        // Find the closest non-removed segments on the left and on the right
-        val prev = aliveSegmentLeft()
-        val next = aliveSegmentRight()
-        // Update the neighbors' links
-        prev?.casNext(this, next)
-        next.casPrev(this, prev)
-        // Set the `prev` link of the current segment to `null` to avoid memory leaks
-        this.cleanPrev()
-        // Initiate the removal process on the neighbors to resolve data races
-        next.tryRemoveSegment()
-        prev?.tryRemoveSegment()
+        while (true) {
+            // Find the closest non-removed segments on the left and on the right
+            val prev = aliveSegmentLeft
+            val next = aliveSegmentRight
+            // Update the neighbors' links
+            next.prev.update { if (it == null) null else prev }
+            if (prev != null) prev.next.value = next
+            // Check that prev and next are still alive
+            if (next.isRemoved && !next.isTail) continue
+            if (prev != null && prev.isRemoved) continue
+            // This segment is physically removed.
+            return
+        }
     }
 
     /**
        This method is used to find the closest alive segment on the left from `this` segment.
        If such a segment does not exist, `null` is returned.
      */
-    private fun aliveSegmentLeft(): ChannelSegment<E>? {
+    private val aliveSegmentLeft: ChannelSegment<E>? get() {
         var cur = getPrev()
-        while (cur != null && cur.isRemoved) {
+        while (cur != null && cur.isRemoved)
             cur = cur.getPrev()
-        }
         return cur
     }
 
     /**
        This method is used to find the closest alive segment on the right from `this` segment.
-       The tail segment is returned, if the end of the segment list is reached.
+       The tail segment is returned if the end of the segment list is reached.
      */
-    private fun aliveSegmentRight(): ChannelSegment<E> {
-        var cur = getNext()
-        while (cur!!.isRemoved && cur.getNext() != null) {
-            cur = cur.getNext()
-        }
+    private val aliveSegmentRight: ChannelSegment<E> get() {
+        var cur = getNext() ?: error("Trying to get `aliveSegmentRight` on the tail.")
+        while (cur.isRemoved)
+            cur = cur.getNext() ?: return cur
         return cur
     }
 
