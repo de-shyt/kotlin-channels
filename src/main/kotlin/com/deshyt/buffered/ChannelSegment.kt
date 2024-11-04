@@ -9,8 +9,7 @@ import kotlinx.atomicfu.update
  * The channel is represented as a list of segments, which simulates an infinite array.
  * Each segment has its own [id], which increases from the beginning.
  *
- * The structure of the segment list is manipulated via the methods [findSegment],
- * [tryRemoveSegment] and [BufferedChannel.removeIfProcessed].
+ * The structure of the segment list is manipulated via the methods [findSegment] and [remove].
  */
 internal class ChannelSegment<E>(
     private val channel: BufferedChannel<E>,
@@ -97,7 +96,6 @@ internal class ChannelSegment<E>(
             // Increase the number of interrupted cells and remove the segment physically
             // in case it becomes logically removed.
             increaseInterruptedCellsCounter()
-            tryRemoveSegment()
         } else {
             // The cell's state has already been set to INTERRUPTED, no further actions
             // are needed. Finish the [onCancellation] invocation.
@@ -107,9 +105,8 @@ internal class ChannelSegment<E>(
 
     private fun increaseInterruptedCellsCounter() {
         val updatedValue = interruptedCellsCounter.incrementAndGet()
-        check(updatedValue <= SEGMENT_SIZE) {
-            "Segment $this: some cells were interrupted more than once (counter=$updatedValue, SEGMENT_SIZE=$SEGMENT_SIZE)."
-        }
+        check(updatedValue <= SEGMENT_SIZE) { "Some cells were interrupted more than once." }
+        if (isRemoved) remove()
     }
 
     // ###################################################
@@ -120,7 +117,7 @@ internal class ChannelSegment<E>(
        This value shows whether the segment is logically removed. It returns true if all cells
        in the segment were marked interrupted.
     */
-    internal val isRemoved: Boolean get() = interruptedCells == SEGMENT_SIZE
+    internal val isRemoved: Boolean get() = interruptedCells == SEGMENT_SIZE && !isTail
 
     /**
        This value shows that the segment is the last one in the segment list. The tail cannot
@@ -133,25 +130,25 @@ internal class ChannelSegment<E>(
        If there are segments which are logically removed, they are skipped.
      */
     internal fun findSegment(destSegmentId: Long): ChannelSegment<E> {
-        var curSegment = this
-        while (curSegment.isRemoved || curSegment.id < destSegmentId) {
-            val nextSegment = ChannelSegment(id = curSegment.id + 1, prevSegment = curSegment, channel = channel)
-            if (curSegment.casNext(null, nextSegment)) {
+        var cur = this
+        while (cur.isRemoved || cur.id < destSegmentId) {
+            val nextSegment = ChannelSegment(id = cur.id + 1, prevSegment = cur, channel = channel)
+            if (cur.casNext(null, nextSegment)) {
                 // The tail was updated. Check if the old tail should be removed.
-                curSegment.tryRemoveSegment()
+                if (cur.isRemoved) cur.remove()
             }
-            curSegment = curSegment.getNext()!!
+            cur = cur.getNext()!!
         }
-        return curSegment
+        return cur
     }
 
     internal fun findSpecifiedOrLast(destSegmentId: Long): ChannelSegment<E> {
         // Start searching the required segment from the specified one.
-        var curSegment = this
-        while (curSegment.id < destSegmentId) {
-            curSegment = curSegment.getNext() ?: break
+        var cur = this
+        while (cur.id < destSegmentId) {
+            cur = cur.getNext() ?: break
         }
-        return curSegment
+        return cur
     }
 
     /**
@@ -159,11 +156,8 @@ internal class ChannelSegment<E>(
        checks if all cells in the segment were interrupted. Then, in case it is true, it removes
        the segment physically by updating the neighbours' [prev] and [next] links.
      */
-    private fun tryRemoveSegment() {
-        if (!isRemoved) {
-            // There are non-interrupted cells, no need to remove the segment.
-            return
-        }
+    internal fun remove() {
+        check(isRemoved || isTail) { "Segment should be logically removed before being removed physically." }
         if (isTail) {
             // The tail segment cannot be physically removed, otherwise it is not guaranteed that
             // each segment has a unique id. Instead, it is removed when a new segment is added and
@@ -241,7 +235,7 @@ internal class ChannelSegment<E>(
         check(interruptedCells == this.interruptedCells) { "Segment $this: the segment's counter (${this.interruptedCells}) and the amount of interrupted cells ($interruptedCells) are different." }
         // Check that, in case all cells were interrupted, the segment is logically removed.
         if (interruptedCells == SEGMENT_SIZE) {
-            check(isRemoved) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
+            check(isRemoved || isTail) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
         }
     }
 }

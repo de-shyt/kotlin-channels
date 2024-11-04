@@ -9,7 +9,7 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
+internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     /**
       The counters show the total amount of senders and receivers ever performed. They are
       incremented in the beginning of the corresponding operation, thus acquiring a unique
@@ -573,8 +573,8 @@ class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             // segment can be logically removed and reachable if it is bounded with
             // a channel pointer.
             if (curSegment.isRemoved) {
-                // The segment is marked as logically removed. Check that it is bounded with at least
-                // one of the channel pointers.
+                // The segment is marked as logically removed.
+                // Check that it is bounded with at least one of the channel pointers.
                 check(curSegment == sendSegment.value || curSegment == receiveSegment.value || curSegment == bufferEndSegment.value) {
                     "Channel $this: logically removed segment is reachable from the segment list."
                 }
