@@ -126,18 +126,25 @@ internal class ChannelSegment<E>(
     internal val isTail: Boolean get() = getNext() == null
 
     /**
-       This method looks for a segment with id equal to or greater than the requested [destSegmentId].
+       This method looks for a segment with id equal to or greater than the requested [id].
        If there are segments which are logically removed, they are skipped.
      */
-    internal fun findSegment(destSegmentId: Long): ChannelSegment<E> {
+    internal fun findSegment(id: Long): ChannelSegment<E> {
         var cur = this
-        while (cur.isRemoved || cur.id < destSegmentId) {
-            val nextSegment = ChannelSegment(id = cur.id + 1, prevSegment = cur, channel = channel)
-            if (cur.casNext(null, nextSegment)) {
+        while (cur.id < id || cur.isRemoved) {
+            val next = cur.getNext()
+            if (next != null) {
+                // There is the next segment, move there
+                cur = next
+                continue
+            }
+            val newTail = ChannelSegment(id = cur.id + 1, prevSegment = cur, channel = channel)
+            if (cur.casNext(null, newTail)) {
                 // The tail was updated. Check if the old tail should be removed.
                 if (cur.isRemoved) cur.remove()
+                // Move to the new tail
+                cur = newTail
             }
-            cur = cur.getNext()!!
         }
         return cur
     }
