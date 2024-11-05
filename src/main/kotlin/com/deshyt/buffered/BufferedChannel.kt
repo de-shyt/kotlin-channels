@@ -361,6 +361,22 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
     }
 
+    @Suppress("NOTHING_TO_INLINE")
+    internal inline fun AtomicRef<ChannelSegment<E>>.moveToSpecifiedOrLast(id: Long, startFrom: ChannelSegment<E>) {
+        // Start searching the required segment from the specified one.
+        var segment = startFrom.findSpecifiedOrLast(id)
+        // Skip all removed segments and try to update `bufferEndSegment` to the first non-removed one.
+        // This part should succeed eventually, as the tail segment is never removed.
+        while (true) {
+            while (segment.isRemoved) {
+                segment = segment.getNext() ?: break
+            }
+            // Try to update `AtomicRef<S>`. On failure, the found segment is already removed,
+            // so it should be skipped.
+            if (moveForward(segment)) return
+        }
+    }
+
     /**
        This method helps to move the `AtomicRef` pointer forward.
        If the pointer is being moved to the segment which is logically removed, the method
@@ -411,7 +427,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                 // The cell is not covered by send() request.
                 // Should `bufferEndSegment` be moved forward to avoid memory leaks?
                 if (segment.id < id && segment.getNext() != null)
-                    moveSegmentBufferEndToSpecifiedOrLast(id, segment)
+                    bufferEndSegment.moveToSpecifiedOrLast(id, segment)
                 // Increment the number of completed `expandBuffer()`-s and finish.
                 incCompletedExpandBufferAttempts()
                 return
@@ -509,21 +525,6 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
      */
     private fun incCompletedExpandBufferAttempts(nAttempts: Long = 1) {
         completedExpandBuffers.addAndGet(nAttempts)
-    }
-
-    private fun moveSegmentBufferEndToSpecifiedOrLast(id: Long, startFrom: ChannelSegment<E>) {
-        // Start searching the required segment from the specified one.
-        var segment = startFrom.findSpecifiedOrLast(id)
-        // Skip all removed segments and try to update `bufferEndSegment` to the first non-removed one.
-        // This part should succeed eventually, as the tail segment is never removed.
-        while (true) {
-            while (segment.isRemoved) {
-                segment = segment.getNext() ?: break
-            }
-            // Try to update `bufferEndSegment`. On failure, the found segment is already removed,
-            // so it should be skipped.
-            if (bufferEndSegment.moveForward(segment)) return
-        }
     }
 
     /**
