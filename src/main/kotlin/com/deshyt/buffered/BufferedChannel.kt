@@ -130,7 +130,8 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                         // The resumption has failed, since the receiver was cancelled.
                         // Clean the cell and wait until `expandBuffer()`-s invoked on the cells
                         // before the current one finish.
-                        segment.onCancellation(index = index, isSender = false)
+                        segment.setState(index, CellState.INTERRUPTED_RCV)
+                        segment.onCancelledRequest(index = index, isSender = false)
                         RESULT_FAILED
                     }
                 }
@@ -230,7 +231,8 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                             // The resumption has failed. Update the cell state and restart the receiver.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // skip this cell, so `expandBuffer()` should be called once again.
-                            segment.onCancellation(index = index, isSender = true)
+                            segment.setState(index, CellState.INTERRUPTED_SEND)
+                            segment.onCancelledRequest(index = index, isSender = true)
                             if (helpExpandBuffer) expandBuffer()
                             RESULT_FAILED
                         }
@@ -475,7 +477,8 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                                 segment.setState(index, CellState.BUFFERED)
                                 true
                             } else {
-                                segment.onCancellation(index = index, isSender = true)
+                                segment.setState(index, CellState.INTERRUPTED_SEND)
+                                segment.onCancelledRequest(index = index, isSender = true)
                                 false
                             }
                         }

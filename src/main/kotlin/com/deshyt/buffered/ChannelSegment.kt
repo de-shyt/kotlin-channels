@@ -85,29 +85,26 @@ internal class ChannelSegment<E>(
        to guarantee that [BufferedChannel.expandBuffer] has processed all cells before the segment
        is physically removed.
     */
-    internal fun onCancellation(index: Int, isSender: Boolean) {
-        val stateOnCancellation = if (isSender) CellState.INTERRUPTED_SEND else CellState.INTERRUPTED_RCV
-        if (getAndSetState(index, stateOnCancellation) != stateOnCancellation) {
-            // The cell is marked interrupted. Clean the cell to avoid memory leaks.
-            cleanElement(index)
-            // If the cancelled request is a receiver, wait until `expandBuffer()`-s
-            // invoked on the cells before the current one finish.
-            if (!isSender) channel.waitExpandBufferCompletion(id * SEGMENT_SIZE + index)
-            // Increase the number of interrupted cells and remove the segment physically
-            // in case it becomes logically removed.
-            increaseInterruptedCellsCounter()
-        } else {
-            // The cell's state has already been set to INTERRUPTED, no further actions
-            // are needed. Finish the [onCancellation] invocation.
-            return
-        }
+    internal fun onCancelledRequest(index: Int, isSender: Boolean) {
+        // The cell is marked interrupted. Clean the cell to avoid memory leaks.
+        cleanElement(index)
+        // If the cancelled request is a receiver, wait until `expandBuffer()`-s
+        // invoked on the cells before the current one finish.
+        if (!isSender) channel.waitExpandBufferCompletion(id * SEGMENT_SIZE + index)
+        // Increase the number of interrupted cells and remove the segment physically
+        // in case it becomes logically removed.
+        onSlotCleaned()
     }
 
-    private fun increaseInterruptedCellsCounter() {
-        val updatedValue = interruptedCellsCounter.incrementAndGet()
-        check(updatedValue <= SEGMENT_SIZE) { "Some cells were interrupted more than once." }
-        if (isRemoved) remove()
-    }
+    /**
+       This method is used to increase the [interruptedCellsCounter] when a suspended request store
+       in the cell is cancelled.
+     */
+    internal fun onSlotCleaned(): Unit =
+        interruptedCellsCounter.incrementAndGet().let {
+            check(it <= SEGMENT_SIZE) { "Some cell was interrupted twice." }
+            if (it == SEGMENT_SIZE) remove()
+        }
 
     // ###################################################
     // # Manipulation with the structure of segment list #
