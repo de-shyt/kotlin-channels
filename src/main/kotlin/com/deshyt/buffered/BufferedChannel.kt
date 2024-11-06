@@ -369,7 +369,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         // This part should succeed eventually, as the tail segment is never removed.
         while (true) {
             while (segment.isRemoved) {
-                segment = segment.getNext() ?: break
+                segment = segment.next ?: break
             }
             // Try to update `AtomicRef<S>`. On failure, the found segment is already removed,
             // so it should be skipped.
@@ -426,7 +426,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             if (b >= sendersCounter.value) {
                 // The cell is not covered by send() request.
                 // Should `bufferEndSegment` be moved forward to avoid memory leaks?
-                if (segment.id < id && segment.getNext() != null)
+                if (segment.id < id && segment.next != null)
                     bufferEndSegment.moveToSpecifiedOrLast(id, segment)
                 // Increment the number of completed `expandBuffer()`-s and finish.
                 incCompletedExpandBufferAttempts()
@@ -568,39 +568,39 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             "Channel $this: bufferEndSegment should not have lower id than receiveSegment."
         }
 
-        var curSegment: ChannelSegment<E> = firstSegment
+        var segment: ChannelSegment<E> = firstSegment
 
         // The loop stops when the tail is reached. The tail can be marked as logically removed, but it
         // cannot be removed physically. Otherwise, the uniqueness of the segment id is not guaranteed.
-        while (curSegment.getNext() != null) {
+        while (segment.next != null) {
             // Check that the removed segments are not reachable from the list. The
             // segment can be logically removed and reachable if it is bounded with
             // a channel pointer.
-            if (curSegment.isRemoved) {
+            if (segment.isRemoved) {
                 // The segment is marked as logically removed.
                 // Check that it is bounded with at least one of the channel pointers.
-                check(curSegment == sendSegment.value || curSegment == receiveSegment.value || curSegment == bufferEndSegment.value) {
+                check(segment == sendSegment.value || segment == receiveSegment.value || segment == bufferEndSegment.value) {
                     "Channel $this: logically removed segment is reachable from the segment list."
                 }
                 // Check that all cells of the logically removed segment were interrupted.
-                check(curSegment.interruptedCells == SEGMENT_SIZE) {
-                    "The segment is logically removed, but amount of interrupted cells (${curSegment.interruptedCells}) is not equal to SEGMENT_SIZE ($SEGMENT_SIZE)."
+                check(segment.interruptedCells == SEGMENT_SIZE) {
+                    "The segment is logically removed, but amount of interrupted cells (${segment.interruptedCells}) is not equal to SEGMENT_SIZE ($SEGMENT_SIZE)."
                 }
             } else {
                 // The segment is not marked as logically removed.
                 // Check that the segment list remains double-linked.
-                check(curSegment.getNext()!!.getPrev() == curSegment) {
+                check(segment.next!!.prev == segment) {
                     "Channel $this: the `segment.next.prev == segment` invariant is violated."
                 }
             }
             // Check that the segment's state is correct
-            curSegment.validate()
+            segment.validate()
             // Process the next segment
-            curSegment = curSegment.getNext()!!
+            segment = segment.next!!
         }
 
         // Check that the state of the tail segment is correct
-        curSegment.validate()
+        segment.validate()
     }
 }
 

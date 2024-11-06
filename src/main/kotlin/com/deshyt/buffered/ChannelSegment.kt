@@ -16,8 +16,8 @@ internal class ChannelSegment<E>(
     internal val id: Long,
     prevSegment: ChannelSegment<E>?,
 ) {
-    private val next: AtomicRef<ChannelSegment<E>?> = atomic(null)
-    private val prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment)
+    private val _next: AtomicRef<ChannelSegment<E>?> = atomic(null)
+    private val _prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment)
 
     /**
        This counter shows how many cells are marked interrupted in the segment. If the value
@@ -62,15 +62,13 @@ internal class ChannelSegment<E>(
     // # Manipulation with the segment's neighbour links #
     // ###################################################
 
-    internal fun getNext(): ChannelSegment<E>? = next.value
+    internal val next: ChannelSegment<E>? get() = _next.value
 
-    private fun casNext(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = next.compareAndSet(from, to)
+    internal val prev: ChannelSegment<E>? get() = _prev.value
 
-    internal fun getPrev(): ChannelSegment<E>? = prev.value
+    private fun trySetNext(value: ChannelSegment<E>?) = _next.compareAndSet(null, value)
 
-    private fun casPrev(from: ChannelSegment<E>?, to: ChannelSegment<E>?) = prev.compareAndSet(from, to)
-
-    internal fun cleanPrev() { prev.lazySet(null) }
+    internal fun cleanPrev() { _prev.lazySet(null) }
 
     // ########################
     // # Cancellation Support #
@@ -103,7 +101,7 @@ internal class ChannelSegment<E>(
     internal fun onSlotCleaned(): Unit =
         interruptedCellsCounter.incrementAndGet().let {
             check(it <= SEGMENT_SIZE) { "Some cell was interrupted twice." }
-            if (it == SEGMENT_SIZE) remove()
+            if (isRemoved) remove()
         }
 
     // ###################################################
@@ -120,7 +118,7 @@ internal class ChannelSegment<E>(
        This value shows that the segment is the last one in the segment list. The tail cannot
        be removed physically, until a new segment is added to the list.
      */
-    internal val isTail: Boolean get() = getNext() == null
+    internal val isTail: Boolean get() = next == null
 
     /**
        This method looks for a segment with id equal to or greater than the requested [id].
@@ -129,14 +127,14 @@ internal class ChannelSegment<E>(
     internal fun findSegment(id: Long): ChannelSegment<E> {
         var cur = this
         while (cur.id < id || cur.isRemoved) {
-            val next = cur.getNext()
+            val next = cur.next
             if (next != null) {
                 // There is the next segment, move there
                 cur = next
                 continue
             }
             val newTail = ChannelSegment(id = cur.id + 1, prevSegment = cur, channel = channel)
-            if (cur.casNext(null, newTail)) {
+            if (cur.trySetNext(newTail)) {
                 // The tail was updated. Check if the old tail should be removed.
                 if (cur.isRemoved) cur.remove()
                 // Move to the new tail
@@ -150,7 +148,7 @@ internal class ChannelSegment<E>(
         // Start searching the required segment from the specified one.
         var cur = this
         while (cur.id < destSegmentId) {
-            cur = cur.getNext() ?: break
+            cur = cur.next ?: break
         }
         return cur
     }
@@ -173,8 +171,8 @@ internal class ChannelSegment<E>(
             val prev = aliveSegmentLeft
             val next = aliveSegmentRight
             // Update the neighbors' links
-            next.prev.update { if (it == null) null else prev }
-            if (prev != null) prev.next.value = next
+            next._prev.update { if (it == null) null else prev }
+            if (prev != null) prev._next.value = next
             // Check that prev and next are still alive
             if (next.isRemoved && !next.isTail) continue
             if (prev != null && prev.isRemoved) continue
@@ -188,9 +186,9 @@ internal class ChannelSegment<E>(
        If such a segment does not exist, `null` is returned.
      */
     private val aliveSegmentLeft: ChannelSegment<E>? get() {
-        var cur = getPrev()
+        var cur = prev
         while (cur != null && cur.isRemoved)
-            cur = cur.getPrev()
+            cur = cur.prev
         return cur
     }
 
@@ -199,9 +197,9 @@ internal class ChannelSegment<E>(
        The tail segment is returned if the end of the segment list is reached.
      */
     private val aliveSegmentRight: ChannelSegment<E> get() {
-        var cur = getNext() ?: error("Trying to get `aliveSegmentRight` on the tail.")
+        var cur = next ?: error("Trying to get `aliveSegmentRight` on the tail.")
         while (cur.isRemoved)
-            cur = cur.getNext() ?: return cur
+            cur = cur.next ?: return cur
         return cur
     }
 
@@ -227,7 +225,7 @@ internal class ChannelSegment<E>(
                     check(getElement(index) == null)
                 }
                 CellState.INTERRUPTED_RCV, CellState.INTERRUPTED_SEND -> {
-                    // The cell stored an interrupted request, check that it was cleaned.
+                    // The cell stored a cancelled request, check that it was cleaned.
                     check(getElement(index) == null)
                     interruptedCells++
                 }
