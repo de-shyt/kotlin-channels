@@ -559,7 +559,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         val firstSegment = listOf(receiveSegment.value, sendSegment.value, bufferEndSegment.value).minBy { it.id }
 
         // Check that the `prev` link of the leftmost segment is correct.
-        check(firstSegment.getPrev() == null) {
+        check(firstSegment.prev == null) {
             "Channel $this: the `prev` link of the leftmost segment is not null."
         }
 
@@ -573,25 +573,13 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         // The loop stops when the tail is reached. The tail can be marked as logically removed, but it
         // cannot be removed physically. Otherwise, the uniqueness of the segment id is not guaranteed.
         while (segment.next != null) {
-            // Check that the removed segments are not reachable from the list. The
-            // segment can be logically removed and reachable if it is bounded with
-            // a channel pointer.
-            if (segment.isRemoved) {
-                // The segment is marked as logically removed.
-                // Check that it is bounded with at least one of the channel pointers.
-                check(segment == sendSegment.value || segment == receiveSegment.value || segment == bufferEndSegment.value) {
-                    "Channel $this: logically removed segment is reachable from the segment list."
-                }
-                // Check that all cells of the logically removed segment were interrupted.
-                check(segment.interruptedCells == SEGMENT_SIZE) {
-                    "The segment is logically removed, but amount of interrupted cells (${segment.interruptedCells}) is not equal to SEGMENT_SIZE ($SEGMENT_SIZE)."
-                }
-            } else {
-                // The segment is not marked as logically removed.
-                // Check that the segment list remains double-linked.
-                check(segment.next!!.prev == segment) {
-                    "Channel $this: the `segment.next.prev == segment` invariant is violated."
-                }
+            // Check that the logically removed segments are not reachable from the list.
+            check(!segment.isRemoved) {
+                "Channel $this: logically removed segment is reachable from the segment list."
+            }
+            // Check that the segment list remains double-linked.
+            check(segment.next!!.prev == segment) {
+                "Channel $this: the `segment.next.prev == segment` invariant is violated."
             }
             // Check that the segment's state is correct
             segment.validate()
@@ -599,6 +587,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             segment = segment.next!!
         }
 
+        // It is possible for the tail to be logically removed without being removed physically.
         // Check that the state of the tail segment is correct
         segment.validate()
     }
