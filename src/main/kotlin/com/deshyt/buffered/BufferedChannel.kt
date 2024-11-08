@@ -363,6 +363,17 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     }
 
     /**
+       This method is used in the removal process. It helps to move pointers forward from the segment
+       which was physically removed.
+     */
+    internal fun movePointersForwardFrom(from: ChannelSegment<E>) {
+        check(from.isRemoved) { "Trying to move channel pointers from the alive segment." }
+        if (from == sendSegment.value) sendSegment.moveToSpecifiedOrLast(from.id, from)
+        if (from == receiveSegment.value) receiveSegment.moveToSpecifiedOrLast(from.id, from)
+        if (from == bufferEndSegment.value) bufferEndSegment.moveToSpecifiedOrLast(from.id, from)
+    }
+
+    /**
        This method helps to move the `AtomicRef` pointer forward.
        If the pointer is being moved to the segment which is logically removed, the method
        returns false, thus forcing [findSegmentAndMoveForward] method to restart.

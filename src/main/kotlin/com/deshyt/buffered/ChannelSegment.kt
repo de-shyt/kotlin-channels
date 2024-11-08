@@ -144,10 +144,16 @@ internal class ChannelSegment<E>(
         return cur
     }
 
-    internal fun findSpecifiedOrLast(destSegmentId: Long): ChannelSegment<E> {
+    /**
+       This method returns the segment with the specified [id] or the last segment in the segment
+       list if the required one does not exist (if it was removed or was not created yet).
+
+       Unlike [findSegment], [findSpecifiedOrLast] does not add new segments to the segment list.
+     */
+    internal fun findSpecifiedOrLast(id: Long): ChannelSegment<E> {
         // Start searching the required segment from the specified one.
         var cur = this
-        while (cur.id < destSegmentId) {
+        while (cur.id < id) {
             cur = cur.next ?: break
         }
         return cur
@@ -177,6 +183,8 @@ internal class ChannelSegment<E>(
             if (next.isRemoved && !next.isTail) continue
             if (prev != null && prev.isRemoved) continue
             // This segment is physically removed.
+            // If there are any channel pointers on it, help them to move forward.
+            channel.movePointersForwardFrom(this)
             return
         }
     }
