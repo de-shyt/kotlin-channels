@@ -39,6 +39,9 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
     private val receiveSegment: AtomicRef<ChannelSegment<E>>
     private val bufferEndSegment: AtomicRef<ChannelSegment<E>>
 
+    internal val sendSegmentId get() = sendSegment.value.id
+    internal val receiveSegmentId get() =receiveSegment.value.id
+
     init {
         require(capacity > 0) { "Invalid capacity ($capacity) for a buffered channel, should be >= 1." }
         val firstSegment = ChannelSegment(id = 0, prevSegment = null, channel = this)
@@ -391,7 +394,25 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
         if (compareAndSet(cur, to)) {
             // The segment was successfully moved.
+            // Are there processed segments going before the segment the pointer was moved to?
+            cleanProcessedSegments(cur, to)
             return true
+        }
+    }
+
+    /**
+    This method is responsible for cleaning `prev` references of the segments which
+    have been reached by both [sendSegment] and [receiveSegment] channel pointers.
+
+    When [moveForward] is invoked, it moves the channel pointer to another segment.
+     */
+    private fun cleanProcessedSegments(from: ChannelSegment<E>, to: ChannelSegment<E>) {
+        var cur = from
+        while (cur.id <= to.id && cur.isLeftmostOrProcessed) {
+            cur.cleanPrev()
+            cur = cur.next ?:
+                    // The tail segment is reached.
+                    return
         }
     }
 

@@ -121,6 +121,12 @@ internal class ChannelSegment<E>(
     internal val isTail: Boolean get() = next == null
 
     /**
+       This value shows if both `sendSegment` and `receiveSegment` pointers have reached the segment.
+       If it is true, the `prev` reference of the segment should be `null`.
+     */
+    internal val isLeftmostOrProcessed: Boolean get() = id <= channel.sendSegmentId && id <= channel.receiveSegmentId
+
+    /**
        This method looks for a segment with id equal to or greater than the requested [id].
        If there are segments which are logically removed, they are skipped.
      */
