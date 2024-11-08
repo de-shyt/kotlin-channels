@@ -338,7 +338,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
        to it, the segment is returned by the method.
      */
     @Suppress("NOTHING_TO_INLINE")
-    internal inline fun AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
+    private inline fun AtomicRef<ChannelSegment<E>>.findSegmentAndMoveForward(
         id: Long,
         startFrom: ChannelSegment<E>
     ): ChannelSegment<E> {
@@ -349,40 +349,13 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
     }
 
-    @Suppress("NOTHING_TO_INLINE")
-    internal inline fun AtomicRef<ChannelSegment<E>>.moveToSpecifiedOrLast(id: Long, startFrom: ChannelSegment<E>) {
-        // Start searching the required segment from the specified one.
-        var segment = startFrom.findSpecifiedOrLast(id)
-        // Skip all removed segments and try to update `bufferEndSegment` to the first non-removed one.
-        // This part should succeed eventually, as the tail segment is never removed.
-        while (true) {
-            while (segment.isRemoved) {
-                segment = segment.next ?: break
-            }
-            // Try to update `AtomicRef<S>`. On failure, the found segment is already removed,
-            // so it should be skipped.
-            if (moveForward(segment)) return
-        }
-    }
-
-    /**
-       This method is used in the removal process. It helps to move pointers forward from the segment
-       which was physically removed.
-     */
-    internal fun movePointersForwardFrom(from: ChannelSegment<E>) {
-        check(from.isRemoved) { "Trying to move channel pointers from the alive segment." }
-        if (from == sendSegment.value) sendSegment.moveToSpecifiedOrLast(from.id, from)
-        if (from == receiveSegment.value) receiveSegment.moveToSpecifiedOrLast(from.id, from)
-        if (from == bufferEndSegment.value) bufferEndSegment.moveToSpecifiedOrLast(from.id, from)
-    }
-
     /**
        This method helps to move the `AtomicRef` pointer forward.
        If the pointer is being moved to the segment which is logically removed, the method
        returns false, thus forcing [findSegmentAndMoveForward] method to restart.
      */
     @Suppress("NOTHING_TO_INLINE")
-    internal inline fun AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean = loop { cur ->
+    private inline fun AtomicRef<ChannelSegment<E>>.moveForward(to: ChannelSegment<E>): Boolean = loop { cur ->
         if (cur.id >= to.id) {
             // No need to update the pointer, it was already updated by another request.
             return true
@@ -566,6 +539,39 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             // [expandBuffer]-s invoked on the cells before the [globalIndex]-th one have finished.
             if (b == completedEB && b == bufferEnd.value) return
         }
+    }
+
+    /**
+       This method is used to update the channel pointer by moving it to the existing segment.
+
+       Unlike [findSegmentAndMoveForward], [moveToSpecifiedOrLast] does not add new segments
+       into the segment list.
+     */
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun AtomicRef<ChannelSegment<E>>.moveToSpecifiedOrLast(id: Long, startFrom: ChannelSegment<E>) {
+        // Start searching the required segment from the specified one.
+        var segment = startFrom.findSpecifiedOrLast(id)
+        // Skip all removed segments and try to update the channel pointer to the first non-removed one.
+        // This part should succeed eventually, as the tail segment is never removed.
+        while (true) {
+            while (segment.isRemoved) {
+                segment = segment.next ?: break
+            }
+            // Try to update `AtomicRef<S>`. On failure, the found segment is already removed,
+            // so it should be skipped.
+            if (moveForward(segment)) return
+        }
+    }
+
+    /**
+    This method is used in the removal process. It helps to move pointers forward from
+    the segment which was physically removed.
+     */
+    internal fun movePointersForwardFrom(from: ChannelSegment<E>) {
+        check(from.isRemoved) { "Trying to move channel pointers from the alive segment." }
+        if (from == sendSegment.value) sendSegment.moveToSpecifiedOrLast(from.id, from)
+        if (from == receiveSegment.value) receiveSegment.moveToSpecifiedOrLast(from.id, from)
+        if (from == bufferEndSegment.value) bufferEndSegment.moveToSpecifiedOrLast(from.id, from)
     }
 
     // ###################################

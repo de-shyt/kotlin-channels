@@ -25,7 +25,7 @@ internal class ChannelSegment<E>(
        physically removed.
     */
     private val interruptedCellsCounter = atomic(0)
-    internal val interruptedCells: Int get() = interruptedCellsCounter.value
+    private val interruptedCells: Int get() = interruptedCellsCounter.value
 
     /**
        Represents an array of slots, the amount of slots is equal to [SEGMENT_SIZE].
@@ -40,8 +40,6 @@ internal class ChannelSegment<E>(
     internal fun getState(index: Int): Any? = data[index * 2 + 1].value
 
     internal fun setState(index: Int, value: Any) { data[index * 2 + 1].lazySet(value) }
-
-    internal fun getAndSetState(index: Int, value: Any) = data[index * 2 + 1].getAndSet(value)
 
     internal fun casState(index: Int, from: Any?, to: Any) = data[index * 2 + 1].compareAndSet(from, to)
 
@@ -98,7 +96,7 @@ internal class ChannelSegment<E>(
        This method is used to increase the [interruptedCellsCounter] when a suspended request store
        in the cell is cancelled.
      */
-    internal fun onSlotCleaned(): Unit =
+    private fun onSlotCleaned(): Unit =
         interruptedCellsCounter.incrementAndGet().let {
             check(it <= SEGMENT_SIZE) { "Some cell was interrupted twice." }
             if (isRemoved) remove()
@@ -170,7 +168,7 @@ internal class ChannelSegment<E>(
        checks if all cells in the segment were interrupted. Then, in case it is true, it removes
        the segment physically by updating the neighbours' [prev] and [next] links.
      */
-    internal fun remove() {
+    private fun remove() {
         check(isRemoved || isTail) { "Segment should be logically removed before being removed physically." }
         if (isTail) {
             // The tail segment cannot be physically removed, otherwise it is not guaranteed that
