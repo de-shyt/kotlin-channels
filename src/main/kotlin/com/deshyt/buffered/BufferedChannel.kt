@@ -368,25 +368,27 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         if (compareAndSet(cur, to)) {
             // The segment was successfully moved.
             // Are there processed segments going before the segment the pointer was moved to?
-            cleanProcessedSegments(cur, to)
+            cleanLeftmostPrev(to)
             return true
         }
     }
 
     /**
-    This method is responsible for cleaning `prev` references of the segments which
-    have been reached by both [sendSegment] and [receiveSegment] channel pointers.
+    This method is called to clean the `prev` reference of the leftmost segment.
 
-    When [moveForward] is invoked, it moves the channel pointer to another segment.
+    The method is called when the channel pointer moves forward on the segment list,
+    which may cause a new segment to become the leftmost one.
      */
-    private fun cleanProcessedSegments(from: ChannelSegment<E>, to: ChannelSegment<E>) {
-        var cur = from
-        while (cur.id <= to.id && cur.isLeftmostOrProcessed) {
-            cur.cleanPrev()
-            cur = cur.next ?:
-                    // The tail segment is reached.
+    private fun cleanLeftmostPrev(segment: ChannelSegment<E>) {
+        var cur = segment
+        // Find the leftmost segment.
+        while (!cur.isLeftmostOrProcessed) {
+            cur = cur.prev ?:
+                    // The `prev` reference was cleaned in parallel.
                     return
         }
+        // The leftmost segment is found, clean its `prev` reference.
+        cur.cleanPrev()
     }
 
     /**
