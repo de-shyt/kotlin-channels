@@ -1,0 +1,274 @@
+package com.deshyt.buffered
+
+import kotlinx.atomicfu.AtomicRef
+import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.atomicArrayOfNulls
+import kotlinx.atomicfu.update
+
+/**
+ * The channel is represented as a list of segments, which simulates an infinite array.
+ * Each segment has its own [id], which increases from the beginning.
+ *
+ * The structure of the segment list is manipulated via the methods [findSegment] and [remove].
+ */
+internal class ChannelSegment<E>(
+    private val channel: BufferedChannel<E>,
+    internal val id: Long,
+    prevSegment: ChannelSegment<E>?,
+) {
+    private val _next: AtomicRef<ChannelSegment<E>?> = atomic(null)
+    private val _prev: AtomicRef<ChannelSegment<E>?> = atomic(prevSegment)
+
+    /**
+       This counter shows how many cells are marked interrupted in the segment. If the value
+       is equal to [SEGMENT_SIZE], it means all cells were interrupted and the segment should be
+       physically removed.
+    */
+    private val interruptedCellsCounter = atomic(0)
+    private val interruptedCells: Int get() = interruptedCellsCounter.value
+
+    /**
+       Represents an array of slots, the amount of slots is equal to [SEGMENT_SIZE].
+       Each slot consists of 2 registers: a state and an element.
+    */
+    private val data = atomicArrayOfNulls<Any?>(SEGMENT_SIZE * 2)
+
+    // ######################################
+    // # Manipulation with the State Fields #
+    // ######################################
+
+    internal fun getState(index: Int): Any? = data[index * 2 + 1].value
+
+    internal fun setState(index: Int, value: Any) { data[index * 2 + 1].lazySet(value) }
+
+    internal fun casState(index: Int, from: Any?, to: Any) = data[index * 2 + 1].compareAndSet(from, to)
+
+    // ########################################
+    // # Manipulation with the Element Fields #
+    // ########################################
+
+    internal fun setElement(index: Int, value: E) { data[index * 2].value = value }
+
+    @Suppress("UNCHECKED_CAST")
+    internal fun getElement(index: Int): E? = data[index * 2].value as E?
+
+    internal fun retrieveElement(index: Int): E = getElement(index)!!.also { cleanElement(index) }
+
+    internal fun cleanElement(index: Int) { data[index * 2].lazySet(null) }
+
+    // ###################################################
+    // # Manipulation with the segment's neighbour links #
+    // ###################################################
+
+    internal val next: ChannelSegment<E>? get() = _next.value
+
+    internal val prev: ChannelSegment<E>? get() = _prev.value
+
+    private fun trySetNext(value: ChannelSegment<E>?) = _next.compareAndSet(null, value)
+
+    internal fun cleanPrev() { _prev.lazySet(null) }
+
+    // ########################
+    // # Cancellation Support #
+    // ########################
+
+    /**
+       This method is invoked on the cancellation of the coroutine's continuation. When the
+       coroutine is cancelled, the cell's state is marked interrupted, its element is set to `null`
+       in order to avoid memory leaks and the segment's counter of interrupted cells is increased.
+
+       If the cancelled request is a receiver, the method invokes [BufferedChannel.waitExpandBufferCompletion]
+       to guarantee that [BufferedChannel.expandBuffer] has processed all cells before the segment
+       is physically removed.
+    */
+    internal fun onCancelledRequest(index: Int, isSender: Boolean) {
+        // The cell is marked interrupted. Clean the cell to avoid memory leaks.
+        cleanElement(index)
+        // If the cancelled request is a receiver, wait until `expandBuffer()`-s
+        // invoked on the cells before the current one finish.
+        if (!isSender) channel.waitExpandBufferCompletion(id * SEGMENT_SIZE + index)
+        // Increase the number of interrupted cells and remove the segment physically
+        // in case it becomes logically removed.
+        onSlotCleaned()
+    }
+
+    /**
+       This method is used to increase the [interruptedCellsCounter] when a suspended request store
+       in the cell is cancelled.
+     */
+    private fun onSlotCleaned(): Unit =
+        interruptedCellsCounter.incrementAndGet().let {
+            check(it <= SEGMENT_SIZE) { "Some cell was interrupted twice." }
+            if (isRemoved) remove()
+        }
+
+    // ###################################################
+    // # Manipulation with the structure of segment list #
+    // ###################################################
+
+    /**
+       This value shows whether the segment is logically removed. It returns true if all cells
+       in the segment were marked interrupted.
+    */
+    internal val isRemoved: Boolean get() = interruptedCells == SEGMENT_SIZE && !isTail
+
+    /**
+       This value shows that the segment is the last one in the segment list. The tail cannot
+       be removed physically, until a new segment is added to the list.
+     */
+    internal val isTail: Boolean get() = next == null
+
+    /**
+       This value shows if both `sendSegment` and `receiveSegment` pointers have reached the segment.
+       If it is true, the `prev` reference of the segment should be `null`.
+     */
+    internal val isLeftmostOrProcessed: Boolean get() = id <= channel.sendSegmentId && id <= channel.receiveSegmentId
+
+    /**
+       This method looks for a segment with id equal to or greater than the requested [id].
+       If there are segments which are logically removed, they are skipped.
+     */
+    internal fun findSegment(id: Long): ChannelSegment<E> {
+        var cur = this
+        while (cur.id < id || cur.isRemoved) {
+            val next = cur.next
+            if (next != null) {
+                // There is the next segment, move there
+                cur = next
+                continue
+            }
+            val newTail = ChannelSegment(id = cur.id + 1, prevSegment = cur, channel = channel)
+            if (cur.trySetNext(newTail)) {
+                // The tail was updated. Check if the old tail should be removed.
+                if (cur.isRemoved) cur.remove()
+                // Move to the new tail
+                cur = newTail
+            }
+        }
+        return cur
+    }
+
+    /**
+       This method returns the segment with the specified [id] or the last segment in the segment
+       list if the required one does not exist (if it was removed or was not created yet).
+
+       Unlike [findSegment], [findSpecifiedOrLast] does not add new segments to the segment list.
+     */
+    internal fun findSpecifiedOrLast(id: Long): ChannelSegment<E> {
+        // Start searching the required segment from the specified one.
+        var cur = this
+        while (cur.id < id) {
+            cur = cur.next ?: break
+        }
+        return cur
+    }
+
+    /**
+       This method is responsible for removing the segment from the segment list. First, it
+       checks if all cells in the segment were interrupted. Then, in case it is true, it removes
+       the segment physically by updating the neighbours' [prev] and [next] links.
+     */
+    private fun remove() {
+        check(isRemoved || isTail) { "Segment should be logically removed before being removed physically." }
+        if (isTail) {
+            // The tail segment cannot be physically removed, otherwise it is not guaranteed that
+            // each segment has a unique id. Instead, it is removed when a new segment is added and
+            // this segment is not the tail one anymore.
+            return
+        }
+        while (true) {
+            // Find the closest non-removed segments on the left and on the right
+            val prev = aliveSegmentLeft
+            val next = aliveSegmentRight
+            // Update the neighbors' links
+            next._prev.update { if (it == null) null else prev }
+            if (prev != null) prev._next.value = next
+            // Check that prev and next are still alive
+            if (next.isRemoved && !next.isTail) continue
+            if (prev != null && prev.isRemoved) continue
+            // This segment is physically removed.
+            // If there are any channel pointers on it, help them to move forward.
+            channel.movePointersForwardFrom(this)
+            return
+        }
+    }
+
+    /**
+       This method is used to find the closest alive segment on the left from `this` segment.
+       If such a segment does not exist, `null` is returned.
+     */
+    private val aliveSegmentLeft: ChannelSegment<E>? get() {
+        var cur = prev
+        while (cur != null && cur.isRemoved)
+            cur = cur.prev
+        return cur
+    }
+
+    /**
+       This method is used to find the closest alive segment on the right from `this` segment.
+       The tail segment is returned if the end of the segment list is reached.
+     */
+    private val aliveSegmentRight: ChannelSegment<E> get() {
+        var cur = next ?: error("Trying to get `aliveSegmentRight` on the tail.")
+        while (cur.isRemoved)
+            cur = cur.next ?: return cur
+        return cur
+    }
+
+    // #####################################
+    // # Validation of the segment's state #
+    // #####################################
+
+    override fun toString(): String = "ChannelSegment(id=$id)"
+
+    internal fun validate() {
+        var interruptedCells = 0
+        for (index in 0 until SEGMENT_SIZE) {
+            // Check that there are no memory leaks
+            when (val state = getState(index)) {
+                null, CellState.IN_BUFFER -> {
+                    // The cell is not yet used by any request, check that it remained clean.
+                    check(getElement(index) == null)
+                }
+                CellState.BUFFERED -> {}  // The cell stores a buffered element.
+                is Coroutine, is CoroutineEB -> {}  // The cell stores a suspended request.
+                CellState.DONE_RCV, CellState.POISONED -> {
+                    // The cell was processed or poisoned, check that it was cleaned.
+                    check(getElement(index) == null)
+                }
+                CellState.INTERRUPTED_RCV, CellState.INTERRUPTED_SEND -> {
+                    // The cell stored a cancelled request, check that it was cleaned.
+                    check(getElement(index) == null)
+                    interruptedCells++
+                }
+                CellState.RESUMING_BY_RCV, CellState.RESUMING_BY_EB -> error("Segment $this: state is $state, but should be BUFFERED, DONE_RCV or INTERRUPTED_SEND.")
+                else -> error("Unexpected state $state in $this.")
+            }
+        }
+        // Check that the value of the segment's counter is correct
+        check(interruptedCells == this.interruptedCells) { "Segment $this: the segment's counter (${this.interruptedCells}) and the amount of interrupted cells ($interruptedCells) are different." }
+        // Check that, in case all cells were interrupted, the segment is logically removed.
+        if (interruptedCells == SEGMENT_SIZE) {
+            check(isRemoved || isTail) { "Segment $this: all cells were interrupted, but the segment is not logically removed." }
+        }
+    }
+}
+
+enum class CellState {
+    /* The cell is in the buffer and the sender should not suspend */
+    IN_BUFFER,
+    /* The cell stores a buffered element. When a sender comes to a cell which is not covered
+       by a receiver yet, it buffers the element and leaves the cell without suspending. */
+    BUFFERED,
+    /* The sender resumed the suspended receiver and a rendezvous happened */
+    DONE_RCV,
+    /* When a receiver comes to the cell that is already covered by a sender, but the cell is
+       still empty, it breaks the cell by changing its state to `POISONED`. */
+    POISONED,
+    /* A coroutine was cancelled while waiting for the opposite request. */
+    INTERRUPTED_SEND, INTERRUPTED_RCV,
+    /* Specifies which entity resumes the sender (a coming receiver or `expandBuffer()`) */
+    RESUMING_BY_RCV, RESUMING_BY_EB
+}
+
+const val SEGMENT_SIZE = 2

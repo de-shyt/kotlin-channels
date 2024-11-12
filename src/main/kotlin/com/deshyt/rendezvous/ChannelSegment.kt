@@ -213,7 +213,7 @@ internal class ChannelSegment<E>(
     }
 }
 
-enum class CellState {
+internal enum class CellState {
     /* The element was successfully transferred to a receiver. */
     DONE,
     /* The cell stores a buffered element. When a sender comes to a cell which is not covered
@@ -226,4 +226,4 @@ enum class CellState {
     INTERRUPTED
 }
 
-const val SEGMENT_SIZE = 2
+internal const val SEGMENT_SIZE = 2

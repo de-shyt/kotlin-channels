@@ -1,0 +1,127 @@
+Subject: [PATCH] addCustomScenario
+---
+Index: src/test/kotlin/com/deshyt/TestBase.kt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/test/kotlin/com/deshyt/TestBase.kt b/src/test/kotlin/com/deshyt/TestBase.kt
+--- a/src/test/kotlin/com/deshyt/TestBase.kt	(revision 2e741aef11c59c3c0fcd20141652570c28235ffb)
++++ b/src/test/kotlin/com/deshyt/TestBase.kt	(date 1730974229421)
+@@ -1,12 +1,16 @@
+ package com.deshyt
+ 
+ import org.jetbrains.kotlinx.lincheck.*
++import org.jetbrains.kotlinx.lincheck.execution.ExecutionScenario
+ import org.jetbrains.kotlinx.lincheck.strategy.managed.modelchecking.*
+ import org.jetbrains.kotlinx.lincheck.strategy.stress.*
+ import org.junit.*
+ 
+ 
+-abstract class TestBase(open val sequentialSpecification: Class<*>) {
++abstract class TestBase(
++    open val sequentialSpecification: Class<*>,
++    open val customScenarios: List<ExecutionScenario>
++) {
+     @Test
+     fun modelCheckingTest() = ModelCheckingOptions()
+         .iterations(scenarios)
+@@ -16,6 +20,7 @@
+         .actorsPerThread(actorsPerThreadAmount)
+         .actorsAfter(actorsAfterAmount)
+         .checkObstructionFreedom()
++        .apply { customScenarios.forEach { scenario -> addCustomScenario(scenario) } }
+         .sequentialSpecification(sequentialSpecification)
+         .check(this::class)
+ 
+Index: src/test/kotlin/com/deshyt/ChannelsLincheckTest.kt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/test/kotlin/com/deshyt/ChannelsLincheckTest.kt b/src/test/kotlin/com/deshyt/ChannelsLincheckTest.kt
+--- a/src/test/kotlin/com/deshyt/ChannelsLincheckTest.kt	(revision 2e741aef11c59c3c0fcd20141652570c28235ffb)
++++ b/src/test/kotlin/com/deshyt/ChannelsLincheckTest.kt	(date 1730920305572)
+@@ -7,6 +7,7 @@
+ import kotlinx.coroutines.CancellableContinuation
+ import kotlinx.coroutines.InternalCoroutinesApi
+ import kotlinx.coroutines.suspendCancellableCoroutine
++import org.jetbrains.kotlinx.lincheck.scenario
+ import kotlin.collections.ArrayList
+ 
+ 
+@@ -18,6 +19,25 @@
+ class Buffered2ChannelTest : ChannelTestBase(
+     c = BufferedChannel(2),
+     sequentialSpecification = SequentialBuffered2Channel::class.java,
++    customScenarios = listOf(
++        scenario {
++            parallel {
++                thread {
++                    blockingActor(Buffered1ChannelTest::send, 2)
++                    blockingActor(Buffered1ChannelTest::receive)
++                }
++                thread {
++                    blockingActor(Buffered1ChannelTest::send, 2)
++                    blockingActor(Buffered1ChannelTest::receive)
++                    blockingActor(Buffered1ChannelTest::receive)
++                }
++                thread {
++                    blockingActor(Buffered1ChannelTest::send, 2)
++                    blockingActor(Buffered1ChannelTest::receive)
++                }
++            }
++        }
++    )
+ )
+ 
+ class Buffered1ChannelTest : ChannelTestBase(
+Index: src/test/kotlin/com/deshyt/ChannelTestBase.kt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/test/kotlin/com/deshyt/ChannelTestBase.kt b/src/test/kotlin/com/deshyt/ChannelTestBase.kt
+--- a/src/test/kotlin/com/deshyt/ChannelTestBase.kt	(revision 2e741aef11c59c3c0fcd20141652570c28235ffb)
++++ b/src/test/kotlin/com/deshyt/ChannelTestBase.kt	(date 1730923141271)
+@@ -3,6 +3,7 @@
+ import org.jetbrains.kotlinx.lincheck.annotations.Operation
+ import org.jetbrains.kotlinx.lincheck.annotations.Param
+ import org.jetbrains.kotlinx.lincheck.annotations.Validate
++import org.jetbrains.kotlinx.lincheck.execution.ExecutionScenario
+ import org.jetbrains.kotlinx.lincheck.paramgen.IntGen
+ import kotlin.coroutines.cancellation.CancellationException
+ 
+@@ -12,8 +13,9 @@
+ )
+ abstract class ChannelTestBase(
+     protected val c: Channel<Int>,
+-    override val sequentialSpecification: Class<*>
+-) : TestBase(sequentialSpecification) {
++    override val sequentialSpecification: Class<*>,
++    override val customScenarios: List<ExecutionScenario> = emptyList()
++) : TestBase(sequentialSpecification, customScenarios) {
+ 
+     @Operation(allowExtraSuspension = true, blocking = true)
+     suspend fun send(@Param(name = "elem") elem: Int): Any = try {
+Index: build.gradle.kts
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/build.gradle.kts b/build.gradle.kts
+--- a/build.gradle.kts	(revision 2e741aef11c59c3c0fcd20141652570c28235ffb)
++++ b/build.gradle.kts	(date 1730919352059)
+@@ -14,9 +14,10 @@
+     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0-RC")
+     testImplementation("junit:junit:4.13.1")
+     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0-RC")
+-    testImplementation("org.jetbrains.kotlinx:lincheck:2.34")
++    testImplementation("org.jetbrains.kotlinx:lincheck:2.35-SNAPSHOT")
+ }
+ 
+ repositories {
+     mavenCentral()
++    mavenLocal()
+ }
+
