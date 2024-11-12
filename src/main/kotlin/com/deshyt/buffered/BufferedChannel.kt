@@ -74,10 +74,20 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             segment.setElement(index, elem)
             // Update the cell according to the algorithm. If the cell was poisoned or
             // stores an interrupted receiver, clean the cell and restart the sender.
-            if (updateCellOnSend(s, segment, index)) {
-                return
+            when (updateCellOnSend(s, segment, index)) {
+                // The element was buffered => finish
+                RESULT_BUFFERED -> return
+                // The rendezvous happened => finish
+                RESULT_RENDEZVOUS -> return
+                // The sender was suspended => finish, the opposite request was responsible for the progress
+                RESULT_SUSPENDED -> return
+                // The cell was poisoned or stores an interrupted receiver => restart
+                RESULT_FAILED -> {
+                    // Clean the current cell and restart.
+                    segment.cleanElement(index)
+                    continue
+                }
             }
-            segment.cleanElement(index)
         }
     }
 
@@ -87,7 +97,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         /* The working cell is specified by the segment and the index in it. */
         segment: ChannelSegment<E>,
         index: Int
-    ): Boolean {
+    ): Int {
         while (true) {
             when (val state = segment.getState(index)) {
                 // The cell is empty.
@@ -98,34 +108,34 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                         // Move the cell state to `BUFFERED`.
                         if (segment.casState(index, null, CellState.BUFFERED)) {
                             // The element has been successfully buffered, finish.
-                            return true
+                            return RESULT_BUFFERED
                         }
                     } else {
                         // The sender should suspend.
-                        if (trySuspendRequest(segment, index, isSender = true)) return true
+                        if (trySuspendRequest(segment, index, isSender = true)) return RESULT_SUSPENDED
                     }
                 }
                 // The cell is in the logical buffer => try to buffer the element
                 CellState.IN_BUFFER -> {
-                    if (segment.casState(index, state, CellState.BUFFERED)) return true
+                    if (segment.casState(index, state, CellState.BUFFERED)) return RESULT_BUFFERED
                 }
                 // The cell was poisoned by a receiver => restart the sender
-                CellState.POISONED -> return false
+                CellState.POISONED -> return RESULT_FAILED
                 // Cancelled receiver => restart the sender
-                CellState.INTERRUPTED_RCV -> return false
+                CellState.INTERRUPTED_RCV -> return RESULT_FAILED
                 // Suspended receiver in the cell => try to resume it
                 else -> {
                     val receiver = (state as? Coroutine)?.cont ?: (state as CoroutineEB).cont
                     return if (tryResumeRequest(receiver)) {
                         segment.setState(index, CellState.DONE_RCV)
-                        true
+                        RESULT_RENDEZVOUS
                     } else {
                         // The resumption has failed, since the receiver was cancelled.
                         // Clean the cell and wait until `expandBuffer()`-s invoked on the cells
                         // before the current one finish.
                         segment.setState(index, CellState.INTERRUPTED_RCV)
                         segment.onCancelledRequest(index = index, isSender = false)
-                        false
+                        RESULT_FAILED
                     }
                 }
             }
@@ -155,8 +165,13 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             // Update the cell according to the algorithm. If the rendezvous happened,
             // the received value is returned, then the cell is cleaned to avoid memory
             // leaks. Otherwise, the receiver restarts.
-            if (updateCellOnReceive(r, segment, index)) {
-                return segment.retrieveElement(index)
+            when (updateCellOnReceive(r, segment, index)) {
+                // The receiver was suspended => finish, the opposite request was responsible for the progress
+                RESULT_SUSPENDED -> return segment.retrieveElement(index)
+                // The rendezvous happened => finish
+                RESULT_RENDEZVOUS -> return segment.retrieveElement(index)
+                // The cell was poisoned or stores an interrupted sender => restart
+                RESULT_FAILED -> continue
             }
         }
     }
@@ -167,7 +182,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         /* The working cell is specified by the segment and the index in it. */
         segment: ChannelSegment<E>,
         index: Int
-    ): Boolean {
+    ): Int {
         while (true) {
             when (val state = segment.getState(index)) {
                 // The cell is empty.
@@ -183,20 +198,20 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                         if (segment.casState(index, state, CellState.POISONED)) {
                             // When the cell becomes poisoned, expand the logical buffer and restart.
                             expandBuffer()
-                            return false
+                            return RESULT_FAILED
                         }
                     } else {
                         // The receiver should suspend.
-                        if (trySuspendRequest(segment, index, isSender = false)) return true
+                        if (trySuspendRequest(segment, index, isSender = false)) return RESULT_SUSPENDED
                     }
                 }
                 // Buffered element => finish
                 CellState.BUFFERED -> {
                     segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
-                    return true
+                    return RESULT_RENDEZVOUS
                 }
                 // Cancelled sender => restart
-                CellState.INTERRUPTED_SEND -> return false
+                CellState.INTERRUPTED_SEND -> return RESULT_FAILED
                 // `expandBuffer()` is resuming the sender => wait
                 CellState.RESUMING_BY_EB -> continue
                 // Suspended sender in the cell => try to resume it
@@ -214,7 +229,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
                             // finish, as the sender is resumed. Thus, no further action is required.
                             segment.setState(index, CellState.DONE_RCV).also { expandBuffer() }
-                            true
+                            RESULT_RENDEZVOUS
                         } else {
                             // The resumption has failed. Update the cell state and restart the receiver.
                             // In case a concurrent `expandBuffer()` has delegated its completion, the procedure should
@@ -222,7 +237,7 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                             segment.setState(index, CellState.INTERRUPTED_SEND)
                             segment.onCancelledRequest(index = index, isSender = true)
                             if (helpExpandBuffer) expandBuffer()
-                            false
+                            RESULT_FAILED
                         }
                     }
                 }
@@ -368,25 +383,27 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         if (compareAndSet(cur, to)) {
             // The segment was successfully moved.
             // Are there processed segments going before the segment the pointer was moved to?
-            cleanProcessedSegments(cur, to)
+            cleanLeftmostPrev(to)
             return true
         }
     }
 
     /**
-    This method is responsible for cleaning `prev` references of the segments which
-    have been reached by both [sendSegment] and [receiveSegment] channel pointers.
+       This method is called to clean the `prev` reference of the leftmost segment.
 
-    When [moveForward] is invoked, it moves the channel pointer to another segment.
+       The method is called when the channel pointer moves forward on the segment list,
+       which may cause a new segment to become the leftmost one.
      */
-    private fun cleanProcessedSegments(from: ChannelSegment<E>, to: ChannelSegment<E>) {
-        var cur = from
-        while (cur.id <= to.id && cur.isLeftmostOrProcessed) {
-            cur.cleanPrev()
-            cur = cur.next ?:
-                    // The tail segment is reached.
-                    return
+    private fun cleanLeftmostPrev(segment: ChannelSegment<E>) {
+        var cur = segment
+        // Find the leftmost segment.
+        while (!cur.isLeftmostOrProcessed) {
+            cur = cur.prev ?:
+                // The `prev` reference was cleaned in parallel.
+                return
         }
+        // The leftmost segment is found, clean its `prev` reference.
+        cur.cleanPrev()
     }
 
     /**
@@ -633,3 +650,11 @@ internal data class Coroutine(val cont: CancellableContinuation<Boolean>)
    needed. If the resumption fails, [BufferedChannel.expandBuffer] should be invoked.
  */
 internal data class CoroutineEB(val cont: CancellableContinuation<Boolean>)
+
+/**
+These constants are return values for [BufferedChannel.updateCellOnSend] and [BufferedChannel.updateCellOnReceive] methods.
+ */
+private const val RESULT_RENDEZVOUS = 0
+private const val RESULT_BUFFERED = 1
+private const val RESULT_SUSPENDED = 2
+private const val RESULT_FAILED = 3
