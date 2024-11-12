@@ -76,13 +76,20 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
             // stores an interrupted receiver, clean the cell and restart the sender.
             when (updateCellOnSend(s, segment, index)) {
                 // The element was buffered => finish
-                RESULT_BUFFERED -> return
+                RESULT_BUFFERED -> {
+                    if (segment.id <= receiveSegmentId) segment.cleanPrev()
+                    return
+                }
                 // The rendezvous happened => finish
-                RESULT_RENDEZVOUS -> return
+                RESULT_RENDEZVOUS -> {
+                    segment.cleanPrev()
+                    return
+                }
                 // The sender was suspended => finish, the opposite request was responsible for the progress
                 RESULT_SUSPENDED -> return
                 // The cell was poisoned or stores an interrupted receiver => restart
                 RESULT_FAILED -> {
+                    segment.cleanPrev()
                     // Clean the current cell and restart.
                     segment.cleanElement(index)
                     continue
@@ -169,9 +176,15 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
                 // The receiver was suspended => finish, the opposite request was responsible for the progress
                 RESULT_SUSPENDED -> return segment.retrieveElement(index)
                 // The rendezvous happened => finish
-                RESULT_RENDEZVOUS -> return segment.retrieveElement(index)
+                RESULT_RENDEZVOUS -> {
+                    segment.cleanPrev()
+                    return segment.retrieveElement(index)
+                }
                 // The cell was poisoned or stores an interrupted sender => restart
-                RESULT_FAILED -> continue
+                RESULT_FAILED -> {
+                    segment.cleanPrev()
+                    continue
+                }
             }
         }
     }
@@ -382,8 +395,8 @@ internal class BufferedChannel<E>(private val capacity: Long) : Channel<E> {
         }
         if (compareAndSet(cur, to)) {
             // The segment was successfully moved.
-            // Are there processed segments going before the segment the pointer was moved to?
-            cleanLeftmostPrev(to)
+            //TODO  Are there processed segments going before the segment the pointer was moved to?
+//            cleanLeftmostPrev(to)
             return true
         }
     }
